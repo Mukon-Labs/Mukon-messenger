@@ -32,6 +32,7 @@ export default function GroupChatScreen() {
     groupMessages,
     groupKeys,
     groups,
+    groupAvatars,
     sendGroupMessage,
     loadGroupMessages,
     joinGroupRoom,
@@ -53,7 +54,6 @@ export default function GroupChatScreen() {
   const [replyToMessage, setReplyToMessage] = useState<any>(null);
   const [quickReactVisible, setQuickReactVisible] = useState<string | null>(null);
   const [memberProfiles, setMemberProfiles] = useState<Map<string, { name: string; avatar: string }>>(new Map());
-  const [groupAvatar, setGroupAvatar] = useState<string | null>(null);
   const [renameDialogVisible, setRenameDialogVisible] = useState(false);
   const [newName, setNewName] = useState('');
   const flatListRef = useRef<FlatList>(null);
@@ -64,15 +64,8 @@ export default function GroupChatScreen() {
     return groups.find(g => Buffer.from(g.groupId).toString('hex') === groupId);
   }, [groups, groupId]);
 
-  // Load group avatar
-  useEffect(() => {
-    const loadAvatar = async () => {
-      if (!wallet?.publicKey) return;
-      const avatar = await getGroupAvatar(wallet.publicKey, groupId);
-      setGroupAvatar(avatar);
-    };
-    loadAvatar();
-  }, [groupId, wallet]);
+  // Get group avatar from groupAvatars Map (loaded by MessengerContext from backend)
+  const groupAvatar = groupAvatars.get(groupId) || null;
 
   // Set header title with avatar
   useEffect(() => {
@@ -112,7 +105,7 @@ export default function GroupChatScreen() {
         </View>
       ),
     });
-  }, [groupName, groupId, groupAvatar]);
+  }, [groupName, groupId, groupAvatar, groupAvatars]);
 
   // Load member profiles
   useEffect(() => {

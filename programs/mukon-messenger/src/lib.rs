@@ -1,18 +1,18 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Token, TokenAccount};
 use sha2::{Digest, Sha256};
-use arcium_anchor::prelude::*;
-use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
-use arcium_macros::{circuit_hash, comp_def_offset};
+// ARCIUM TEMPORARILY DISABLED - Re-enable after core demo
+// use arcium_anchor::prelude::*;
+// use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
+// use arcium_macros::{circuit_hash, comp_def_offset};
 
 declare_id!("GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj");
 
-// Arcium MPC computation definition offsets
-const COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT: u32 = comp_def_offset!("is_accepted_contact");
-const COMP_DEF_OFFSET_COUNT_ACCEPTED: u32 = comp_def_offset!("count_accepted");
-const COMP_DEF_OFFSET_ADD_TWO_NUMBERS: u32 = comp_def_offset!("add_two_numbers");
-
-const SIGN_PDA_SEED: [u8; 20] = *b"ArciumSignerAccount";
+// ARCIUM TEMPORARILY DISABLED
+// const COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT: u32 = comp_def_offset!("is_accepted_contact");
+// const COMP_DEF_OFFSET_COUNT_ACCEPTED: u32 = comp_def_offset!("count_accepted");
+// const COMP_DEF_OFFSET_ADD_TWO_NUMBERS: u32 = comp_def_offset!("add_two_numbers");
+// const SIGN_PDA_SEED: [u8; 20] = *b"ArciumSignerAccount";
 
 #[error_code]
 pub enum ErrorCode {
@@ -44,10 +44,11 @@ pub enum ErrorCode {
     InvalidTokenAccount,
     #[msg("Unauthorized")]
     Unauthorized,
-    #[msg("Computation aborted")]
-    AbortedComputation,
-    #[msg("Cluster not set")]
-    ClusterNotSet,
+    // ARCIUM TEMPORARILY DISABLED
+    // #[msg("Computation aborted")]
+    // AbortedComputation,
+    // #[msg("Cluster not set")]
+    // ClusterNotSet,
 }
 
 // Deterministic hash function for chat PDAs
@@ -73,7 +74,8 @@ fn get_chat_hash(a: Pubkey, b: Pubkey) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-#[arcium_program]
+// ARCIUM TEMPORARILY DISABLED - using regular #[program] instead
+#[program]
 pub mod mukon_messenger {
     use super::*;
 
@@ -687,7 +689,9 @@ pub mod mukon_messenger {
     }
 
     // ========== ARCIUM MPC INSTRUCTIONS ==========
+    // TEMPORARILY DISABLED - Re-enable after core demo
 
+    /*
     /// Initialize computation definition for is_accepted_contact circuit
     pub fn init_is_accepted_contact_comp_def(ctx: Context<InitIsAcceptedContactCompDef>) -> Result<()> {
         init_comp_def(
@@ -856,6 +860,7 @@ pub mod mukon_messenger {
         msg!("count_accepted computation completed");
         Ok(())
     }
+    */
 }
 
 // ========== ACCOUNT STRUCTURES ==========
@@ -1293,6 +1298,8 @@ pub struct CloseGroupKey<'info> {
 
 // ========== ARCIUM MPC CONTEXT STRUCTURES ==========
 
+// ARCIUM ACCOUNT STRUCTS - TEMPORARILY DISABLED
+/*
 /// Context for initializing is_accepted_contact computation definition
 #[init_computation_definition_accounts("is_accepted_contact", payer)]
 #[derive(Accounts)]
@@ -1455,3 +1462,4 @@ pub struct ContactCountResult {
     pub nonce: u128,
     pub encryption_key: [u8; 32],
 }
+*/

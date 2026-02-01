@@ -5,7 +5,7 @@
 // - Emulator: Use 10.0.2.2:3001
 
 export const BACKEND_URL = __DEV__
-  ? 'http://192.168.1.33:3001'  // Home WiFi IP
+  ? 'http://192.168.68.61:3001'  // Cowork WiFi IP
   : 'https://mukon-backend.fly.dev';  // Production URL (deploy later)
 
 // Solana RPC configuration

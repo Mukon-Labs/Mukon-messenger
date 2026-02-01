@@ -879,7 +879,9 @@ export function deserializeGroupKeyShare(data: Buffer): GroupKeyShare {
 /**
  * Import Arcium utilities
  * Note: These are used by the Arcium instruction builders below
+ * ARCIUM TEMPORARILY DISABLED - Re-enable after core demo
  */
+/*
 import {
   getMXEAddress,
   getCompDefAddress,
@@ -888,6 +890,7 @@ import {
   getExecutingPoolAddress,
   getComputationAddress,
 } from './arcium';
+*/
 
 /**
  * Get Arcium program ID
@@ -987,131 +990,3 @@ function getSignPDA(): PublicKey {
   return pda;
 }
 
-/**
- * Build check_is_contact instruction
- */
-export function createCheckIsContactInstruction(
-  payer: PublicKey,
-  computationOffset: number,
-  encryptedContactList: Uint8Array,
-  encryptedQueryPubkey: Uint8Array,
-  pubKey: Uint8Array,
-  nonceList: bigint,
-  nonceQuery: bigint
-): TransactionInstruction {
-  const signPdaAccount = getSignPDA();
-  const mxeAccount = getMXEAddress();
-  const mempoolAccount = getMempoolAddress();
-  const executingPool = getExecutingPoolAddress();
-  const computationAccount = getComputationAddress(computationOffset);
-  const compDefAccount = getCompDefAddress('is_accepted_contact');
-  const clusterAccount = getClusterAddress();
-
-  // Serialize instruction data
-  // discriminator + computation_offset (u64) + encrypted_contact_list (Vec<u8>) + encrypted_query_pubkey (Vec<u8>) + pub_key ([u8;32]) + nonce_list (u128) + nonce_query (u128)
-  const offsetBuf = Buffer.alloc(8);
-  offsetBuf.writeBigUInt64LE(BigInt(computationOffset), 0);
-
-  const contactListLenBuf = Buffer.alloc(4);
-  contactListLenBuf.writeUInt32LE(encryptedContactList.length, 0);
-
-  const queryPubkeyLenBuf = Buffer.alloc(4);
-  queryPubkeyLenBuf.writeUInt32LE(encryptedQueryPubkey.length, 0);
-
-  const nonceListBuf = Buffer.alloc(16);
-  nonceListBuf.writeBigUInt64LE(nonceList & BigInt('0xFFFFFFFFFFFFFFFF'), 0);
-  nonceListBuf.writeBigUInt64LE(nonceList >> BigInt(64), 8);
-
-  const nonceQueryBuf = Buffer.alloc(16);
-  nonceQueryBuf.writeBigUInt64LE(nonceQuery & BigInt('0xFFFFFFFFFFFFFFFF'), 0);
-  nonceQueryBuf.writeBigUInt64LE(nonceQuery >> BigInt(64), 8);
-
-  const data = Buffer.concat([
-    DISCRIMINATORS.check_is_contact,
-    offsetBuf,
-    contactListLenBuf,
-    Buffer.from(encryptedContactList),
-    queryPubkeyLenBuf,
-    Buffer.from(encryptedQueryPubkey),
-    Buffer.from(pubKey),
-    nonceListBuf,
-    nonceQueryBuf,
-  ]);
-
-  return new TransactionInstruction({
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: signPdaAccount, isSigner: false, isWritable: true },
-      { pubkey: mxeAccount, isSigner: false, isWritable: false },
-      { pubkey: mempoolAccount, isSigner: false, isWritable: true },
-      { pubkey: executingPool, isSigner: false, isWritable: true },
-      { pubkey: computationAccount, isSigner: false, isWritable: true },
-      { pubkey: compDefAccount, isSigner: false, isWritable: false },
-      { pubkey: clusterAccount, isSigner: false, isWritable: true },
-      { pubkey: ARCIUM_FEE_POOL, isSigner: false, isWritable: true },
-      { pubkey: ARCIUM_CLOCK, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      { pubkey: ARCIUM_PROGRAM_ID, isSigner: false, isWritable: false },
-    ],
-    programId: PROGRAM_ID,
-    data,
-  });
-}
-
-/**
- * Build count_accepted_contacts instruction
- */
-export function createCountAcceptedContactsInstruction(
-  payer: PublicKey,
-  computationOffset: number,
-  encryptedContactList: Uint8Array,
-  pubKey: Uint8Array,
-  nonceList: bigint
-): TransactionInstruction {
-  const signPdaAccount = getSignPDA();
-  const mxeAccount = getMXEAddress();
-  const mempoolAccount = getMempoolAddress();
-  const executingPool = getExecutingPoolAddress();
-  const computationAccount = getComputationAddress(computationOffset);
-  const compDefAccount = getCompDefAddress('count_accepted');
-  const clusterAccount = getClusterAddress();
-
-  // Serialize instruction data
-  const offsetBuf = Buffer.alloc(8);
-  offsetBuf.writeBigUInt64LE(BigInt(computationOffset), 0);
-
-  const contactListLenBuf = Buffer.alloc(4);
-  contactListLenBuf.writeUInt32LE(encryptedContactList.length, 0);
-
-  const nonceListBuf = Buffer.alloc(16);
-  nonceListBuf.writeBigUInt64LE(nonceList & BigInt('0xFFFFFFFFFFFFFFFF'), 0);
-  nonceListBuf.writeBigUInt64LE(nonceList >> BigInt(64), 8);
-
-  const data = Buffer.concat([
-    DISCRIMINATORS.count_accepted_contacts,
-    offsetBuf,
-    contactListLenBuf,
-    Buffer.from(encryptedContactList),
-    Buffer.from(pubKey),
-    nonceListBuf,
-  ]);
-
-  return new TransactionInstruction({
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: signPdaAccount, isSigner: false, isWritable: true },
-      { pubkey: mxeAccount, isSigner: false, isWritable: false },
-      { pubkey: mempoolAccount, isSigner: false, isWritable: true },
-      { pubkey: executingPool, isSigner: false, isWritable: true },
-      { pubkey: computationAccount, isSigner: false, isWritable: true },
-      { pubkey: compDefAccount, isSigner: false, isWritable: false },
-      { pubkey: clusterAccount, isSigner: false, isWritable: true },
-      { pubkey: ARCIUM_FEE_POOL, isSigner: false, isWritable: true },
-      { pubkey: ARCIUM_CLOCK, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      { pubkey: ARCIUM_PROGRAM_ID, isSigner: false, isWritable: false },
-    ],
-    programId: PROGRAM_ID,
-    data,
-  });
-}

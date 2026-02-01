@@ -112,7 +112,7 @@ export default function DarkAlert({
  *
  * return (
  *   <View>
- *     {/* your content */}
+ *     <YourContent />
  *     {DarkAlertComponent}
  *   </View>
  * );

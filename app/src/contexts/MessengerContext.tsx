@@ -43,13 +43,14 @@ import {
 import { deriveEncryptionKeypair, getChatHash } from '../utils/encryption';
 import type { WalletContextType } from './WalletContext';
 import { BACKEND_URL, SOLANA_RPC_URL } from '../config';
-import {
-  getMXEPubKey,
-  encryptContactList,
-  encryptQueryPubkey,
-  waitForComputation,
-  type ContactEntry,
-} from '../utils/arcium';
+// ARCIUM TEMPORARILY DISABLED - Re-enable after core demo
+// import {
+//   getMXEPubKey,
+//   encryptContactList,
+//   encryptQueryPubkey,
+//   waitForComputation,
+//   type ContactEntry,
+// } from '../utils/arcium';
 
 export interface Contact {
   publicKey: PublicKey;
@@ -712,7 +713,27 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
                 return updated;
               });
               console.log('✅ Group key decrypted and stored locally');
-              // Note: On-chain storage is now done lazily when user opens the group chat
+
+              // Auto-backup to on-chain after a delay (to avoid back-to-back wallet prompts)
+              setTimeout(async () => {
+                try {
+                  // Check if already backed up
+                  const backupKey = `groupKeyBackedUp_${wallet!.publicKey!.toBase58()}_${groupId}`;
+                  const alreadyBackedUp = await AsyncStorage.getItem(backupKey);
+                  if (alreadyBackedUp === 'true') {
+                    console.log('⏭️ Group key already backed up on-chain, skipping');
+                    return;
+                  }
+
+                  const { storeGroupKeyOnChain } = await import('../utils/encryption');
+                  const groupIdBytes = Buffer.from(groupId, 'hex');
+                  await storeGroupKeyOnChain(wallet!, connection, decryptedKey, groupIdBytes);
+                  await AsyncStorage.setItem(backupKey, 'true');
+                  console.log('✅ Group key auto-backed up on-chain');
+                } catch (error) {
+                  console.warn('⚠️ Auto-backup failed (user may need to trigger manually):', error);
+                }
+              }, 10000); // 10s delay
             } else {
               console.error('❌ Failed to decrypt group key (decryption returned null)');
             }
@@ -1344,8 +1365,12 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   /**
    * Verify contact privately using Arcium MPC
    * Returns true if contact is accepted, false if not, null on error
+   * ARCIUM TEMPORARILY DISABLED - Re-enable after core demo
    */
   const verifyContactPrivately = async (queryPubkey: string): Promise<boolean | null> => {
+    console.log('Arcium MPC verification temporarily disabled');
+    return null;
+    /*
     if (!wallet?.publicKey || !wallet.signTransaction) {
       console.error('Wallet not connected');
       return null;
@@ -1424,6 +1449,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       console.error('❌ Private contact verification failed:', error);
       return null;
     }
+    */
   };
 
   // Load profile and contacts when encryption keys are available
