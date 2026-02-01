@@ -180,17 +180,35 @@ export default function AddContactScreen({ navigation }: any) {
         <View style={styles.dividerLine} />
       </View>
 
-      <View style={styles.qrContainer}>
-        <IconButton
-          icon="qrcode-scan"
-          size={64}
-          iconColor={theme.colors.textSecondary}
-          onPress={() => {
-            // TODO: Implement QR scanner
-            console.log('Open QR scanner');
-          }}
-        />
-        <Text style={styles.qrText}>Camera</Text>
+      <View style={styles.qrRow}>
+        <View style={styles.qrContainer}>
+          <IconButton
+            icon="qrcode-scan"
+            size={48}
+            iconColor={theme.colors.textSecondary}
+            onPress={() => {
+              // TODO: Implement QR scanner
+              console.log('Open QR scanner');
+            }}
+          />
+          <Text style={styles.qrText}>Scan QR</Text>
+        </View>
+
+        <View style={styles.qrContainer}>
+          <IconButton
+            icon="qrcode"
+            size={48}
+            iconColor={theme.colors.primary}
+            onPress={() => {
+              // TODO: Implement show my QR
+              showAlert(
+                'Show My QR',
+                `Your wallet address:\n${wallet.publicKey?.toBase58()}\n\n(QR display coming soon)`
+              );
+            }}
+          />
+          <Text style={styles.qrText}>Show My QR</Text>
+        </View>
       </View>
 
       <Button
@@ -237,12 +255,17 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     color: theme.colors.textSecondary,
   },
+  qrRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 24,
+  },
   qrContainer: {
+    flex: 1,
     alignItems: 'center',
-    padding: 32,
+    padding: 24,
     backgroundColor: theme.colors.surface,
     borderRadius: 8,
-    marginBottom: 24,
   },
   qrText: {
     color: theme.colors.textSecondary,

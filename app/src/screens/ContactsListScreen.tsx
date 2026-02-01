@@ -23,7 +23,8 @@ export default function ContactsListScreen({ navigation }: any) {
     return acceptedContacts
       .map(contact => {
         const pubkeyStr = contact.publicKey.toBase58();
-        const displayName = displayNames[pubkeyStr] || pubkeyStr;
+        const displayInfo = displayNames.get(pubkeyStr);
+        const displayName = displayInfo?.displayName || contact.displayName || pubkeyStr;
         return {
           pubkey: pubkeyStr,
           displayName,
@@ -94,19 +95,19 @@ export default function ContactsListScreen({ navigation }: any) {
       <View style={styles.actionsContainer}>
         <Button
           mode="contained"
-          icon="account-group"
-          onPress={() => navigation.navigate('CreateGroup')}
-          style={styles.actionButton}
-        >
-          New Group
-        </Button>
-        <Button
-          mode="outlined"
           icon="account-plus"
           onPress={() => navigation.navigate('AddContact')}
           style={styles.actionButton}
         >
           Add Contact
+        </Button>
+        <Button
+          mode="outlined"
+          icon="account-group"
+          onPress={() => navigation.navigate('CreateGroup')}
+          style={styles.actionButton}
+        >
+          New Group
         </Button>
       </View>
 

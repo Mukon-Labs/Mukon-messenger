@@ -14,7 +14,7 @@ import ContactProfileModal from '../components/ContactProfileModal';
 import ChatBackground from '../components/ChatBackground';
 import { useDarkAlert } from '../components/DarkAlert';
 
-type FilterType = 'All' | 'DMs' | 'Groups' | 'Unread';
+type FilterType = 'All' | 'DMs' | 'Groups' | 'Unread' | 'Invites';
 
 export default function ContactsScreen({ navigation }: any) {
   const wallet = useWallet();
@@ -340,7 +340,7 @@ export default function ContactsScreen({ navigation }: any) {
     }
 
     if (item.state === 'Invited') {
-      // You invited them - show pending
+      // You invited them - show pending with cancel option
       return (
         <List.Item
           title={item.displayName || truncateAddress(item.pubkey, 4)}
@@ -359,7 +359,36 @@ export default function ContactsScreen({ navigation }: any) {
               />
             )
           )}
-          right={() => <Text style={{ color: theme.colors.textSecondary }}>Pending</Text>}
+          right={(props) => (
+            <View style={{ justifyContent: 'center', paddingRight: 8 }}>
+              <Button
+                mode="text"
+                onPress={async () => {
+                  showAlert(
+                    'Cancel Invitation',
+                    `Cancel invitation to ${item.displayName || truncateAddress(item.pubkey, 4)}?`,
+                    [
+                      { text: 'No', style: 'cancel' },
+                      {
+                        text: 'Yes, Cancel',
+                        onPress: async () => {
+                          try {
+                            await messenger.deleteContact(new PublicKey(item.pubkey));
+                            showAlert('Cancelled', 'Invitation cancelled');
+                          } catch (error: any) {
+                            showAlert('Error', error.message);
+                          }
+                        },
+                      },
+                    ]
+                  );
+                }}
+                textColor={theme.colors.error}
+              >
+                Cancel
+              </Button>
+            </View>
+          )}
           style={styles.contactItem}
         />
       );
@@ -566,9 +595,10 @@ export default function ContactsScreen({ navigation }: any) {
 
   // Apply filter
   const filteredConversations = allConversations.filter(item => {
-    if (filter === 'DMs') return item.type === 'dm';
+    if (filter === 'DMs') return item.type === 'dm' && item.state === 'Accepted';
     if (filter === 'Groups') return item.type === 'group';
     if (filter === 'Unread') return item.unread > 0;
+    if (filter === 'Invites') return item.state === 'Requested' || item.state === 'Invited';
     return true; // 'All'
   });
 
@@ -657,6 +687,14 @@ export default function ContactsScreen({ navigation }: any) {
           textStyle={filter === 'Unread' ? styles.chipTextSelected : styles.chipText}
         >
           Unread
+        </Chip>
+        <Chip
+          selected={filter === 'Invites'}
+          onPress={() => setFilter('Invites')}
+          style={styles.chip}
+          textStyle={filter === 'Invites' ? styles.chipTextSelected : styles.chipText}
+        >
+          Invites
         </Chip>
       </ScrollView>
 
@@ -918,7 +956,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: 16,
     bottom: 16,
-    backgroundColor: theme.colors.secondary, // Green chat button
+    backgroundColor: theme.colors.primary, // Purple/blue chat button
   },
   registrationContainer: {
     flex: 1,

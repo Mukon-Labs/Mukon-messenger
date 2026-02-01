@@ -87,10 +87,10 @@ export default function CustomDrawer({ navigation }: any) {
       />
 
       <List.Item
-        title="Invite Friends"
+        title="Add Contact"
         left={(props) => <List.Icon {...props} icon="account-plus" color={theme.colors.textSecondary} />}
         onPress={() => {
-          // TODO: Share invite link
+          navigation.navigate('AddContact');
           navigation.closeDrawer();
         }}
         titleStyle={styles.menuItem}
