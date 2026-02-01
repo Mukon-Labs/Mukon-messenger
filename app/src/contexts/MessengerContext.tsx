@@ -640,6 +640,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       console.log('🚫 Member kicked from group:', groupId, memberPubkey);
     });
 
+    // Contact invitation rejected notification
+    newSocket.on('invitation_rejected', ({ rejectorPubkey, peerPubkey }) => {
+      console.log('🚫 Invitation rejected by:', rejectorPubkey);
+      // Reload contacts to update UI (will filter out Rejected contacts)
+      loadContacts();
+    });
+
     // Feature 5: Message acks and read receipts (Groups)
     newSocket.on('group_message_ack', ({ messageId, groupId, timestamp }) => {
       setGroupMessages((prev) => {
@@ -987,6 +994,14 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       const signedTransaction = await wallet.signTransaction(transaction);
       const txSignature = await connection.sendTransaction(signedTransaction);
       await connection.confirmTransaction(txSignature, 'confirmed');
+
+      // Notify the other user that invitation was rejected
+      if (socket) {
+        socket.emit('invitation_rejected', {
+          rejectorPubkey: wallet.publicKey.toBase58(),
+          peerPubkey: inviterPubkey.toBase58(),
+        });
+      }
 
       await loadContacts();
       return txSignature;

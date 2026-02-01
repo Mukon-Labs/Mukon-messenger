@@ -593,8 +593,11 @@ export default function ContactsScreen({ navigation }: any) {
     })),
   ];
 
-  // Apply filter
+  // Apply filter (exclude Rejected contacts from all views)
   const filteredConversations = allConversations.filter(item => {
+    // Hide rejected contacts from all filters
+    if (item.state === 'Rejected') return false;
+
     if (filter === 'DMs') return item.type === 'dm' && item.state === 'Accepted';
     if (filter === 'Groups') return item.type === 'group';
     if (filter === 'Unread') return item.unread > 0;

@@ -308,18 +308,13 @@ pub mod mukon_messenger {
         let me_descriptor = &mut ctx.accounts.payer_descriptor;
         let peer_descriptor = &mut ctx.accounts.peer_descriptor;
 
-        // Allow rejecting pending invites OR deleting accepted contacts
+        // Allow rejecting/deleting ANY contact that exists in YOUR descriptor
+        // Don't check peer's state - allow cleanup regardless of their side (handles corrupted states)
         require!(
             me_descriptor.peers.iter()
                 .any(|p| p.wallet == peer.key() &&
-                     (p.state == PeerState::Requested || p.state == PeerState::Accepted)),
+                     (p.state == PeerState::Requested || p.state == PeerState::Invited || p.state == PeerState::Accepted || p.state == PeerState::Rejected)),
             ErrorCode::NotRequested
-        );
-        require!(
-            peer_descriptor.peers.iter()
-                .any(|p| p.wallet == me.key() &&
-                     (p.state == PeerState::Invited || p.state == PeerState::Accepted)),
-            ErrorCode::NotInvited
         );
 
         for p in me_descriptor.peers.iter_mut() {

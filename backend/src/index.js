@@ -603,13 +603,34 @@ io.on('connection', (socket) => {
 
     console.log(`🗑️  Group ${groupId.slice(0, 8)}... deleted by creator`);
 
-    // Clean up group data
+    // Clean up all group data
     groupMessages.delete(groupId);
     groupRooms.delete(groupId);
     pendingKeyShares.delete(groupId);
+    groupAvatars.delete(groupId);
+    groupReadReceipts.delete(groupId);
 
     // Notify all members
     io.to(`group_${groupId}`).emit('group_deleted', { groupId });
+
+    console.log(`✅ All data deleted for group ${groupId.slice(0, 8)}...`);
+  });
+
+  // Handle invitation rejection notification
+  socket.on('invitation_rejected', ({ rejectorPubkey, peerPubkey }) => {
+    console.log(`🚫 Invitation rejected: ${rejectorPubkey.slice(0, 8)}... rejected ${peerPubkey.slice(0, 8)}...`);
+
+    // Notify the peer that invitation was rejected
+    const peerSocketId = onlineUsers.get(peerPubkey);
+    if (peerSocketId) {
+      io.to(peerSocketId).emit('invitation_rejected', {
+        rejectorPubkey,
+        peerPubkey,
+      });
+      console.log(`✅ Notified ${peerPubkey.slice(0, 8)}... of rejection`);
+    } else {
+      console.log(`⚠️  Peer ${peerPubkey.slice(0, 8)}... is offline`);
+    }
   });
 
   socket.on('disconnect', () => {
