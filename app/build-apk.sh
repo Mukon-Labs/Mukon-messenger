@@ -14,26 +14,19 @@ VARIANT=${1:-debug}
 CLEAN_FLAG=${2}
 
 if [ "$VARIANT" = "release" ]; then
-  echo "📦 Building RELEASE APK..."
+  echo "📦 Building RELEASE APK (with bundled JS)..."
   GRADLE_TASK="assembleRelease"
   APK_NAME="mukon-release.apk"
   SOURCE_PATH="android/app/build/outputs/apk/release/app-release.apk"
-
-  # Bundle JS for release using Expo
-  echo "📦 Bundling JavaScript with Expo..."
-  mkdir -p android/app/src/main/assets
-
-  # Export the app bundle
-  npx expo export:embed --platform android --entry-file index.js --bundle-output android/app/src/main/assets/index.android.bundle --dev false
-
-  echo "✅ JavaScript bundled"
-  echo ""
 else
-  echo "🐛 Building DEBUG APK..."
+  echo "🐛 Building DEBUG APK (uses Metro)..."
   GRADLE_TASK="assembleDebug"
   APK_NAME="mukon-debug.apk"
   SOURCE_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
 fi
+
+echo "📝 Gradle will handle JS bundling based on build type"
+echo ""
 
 # Navigate to android folder
 cd android
