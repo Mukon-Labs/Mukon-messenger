@@ -732,20 +732,12 @@ export default function ContactsScreen({ navigation }: any) {
         style={styles.list}
       />
 
-      {/* Two FABs - Add Contact and Create Group */}
+      {/* Single green chat FAB - opens contacts list */}
       <FAB
-        icon="plus"
+        icon="message"
         style={styles.fab}
-        onPress={() => navigation.navigate('AddContact')}
+        onPress={() => navigation.navigate('ContactsList')}
         color={theme.colors.onPrimary}
-        label="Contact"
-      />
-      <FAB
-        icon="account-group"
-        style={styles.fabGroup}
-        onPress={() => navigation.navigate('CreateGroup')}
-        color={theme.colors.onPrimary}
-        label="Group"
       />
 
       {/* Rename Contact Dialog */}
@@ -925,14 +917,8 @@ const styles = StyleSheet.create({
   fab: {
     position: 'absolute',
     right: 16,
-    bottom: 88, // Stack above group FAB
-    backgroundColor: theme.colors.primary,
-  },
-  fabGroup: {
-    position: 'absolute',
-    right: 16,
     bottom: 16,
-    backgroundColor: theme.colors.secondary,
+    backgroundColor: theme.colors.secondary, // Green chat button
   },
   registrationContainer: {
     flex: 1,

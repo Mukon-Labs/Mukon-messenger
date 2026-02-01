@@ -90,7 +90,7 @@ export default function ContactsListScreen({ navigation }: any) {
         style={styles.searchbar}
       />
 
-      {/* Action Buttons (Fix 2: 3 vertical buttons) */}
+      {/* Action Buttons */}
       <View style={styles.actionsContainer}>
         <Button
           mode="contained"
@@ -106,18 +106,7 @@ export default function ContactsListScreen({ navigation }: any) {
           onPress={() => navigation.navigate('AddContact')}
           style={styles.actionButton}
         >
-          Find by Wallet Address
-        </Button>
-        <Button
-          mode="outlined"
-          icon="account-search"
-          onPress={() => {
-            // TODO: Implement find by name functionality
-            // For now, just focus the search bar
-          }}
-          style={styles.actionButton}
-        >
-          Find by Name
+          Add Contact
         </Button>
       </View>
 
@@ -139,12 +128,19 @@ export default function ContactsListScreen({ navigation }: any) {
         <SectionList
           sections={sections}
           keyExtractor={(item) => item.pubkey}
-          renderItem={({ item }) => (
-            <TouchableOpacity onPress={() => handleContactPress(item)}>
-              <List.Item
-                title={item.displayName}
-                description={`${item.pubkey.slice(0, 8)}...${item.pubkey.slice(-8)}`}
-                left={(props) => (
+          renderItem={({ item }) => {
+            // Show only name OR address (not both)
+            // If displayName is different from pubkey, it's a real name - show only name
+            // Otherwise show only the truncated address
+            const isRealName = item.displayName !== item.pubkey;
+            const displayText = isRealName ? item.displayName : `${item.pubkey.slice(0, 8)}...${item.pubkey.slice(-8)}`;
+
+            return (
+              <TouchableOpacity onPress={() => handleContactPress(item)}>
+                <List.Item
+                  title={displayText}
+                  description={undefined}
+                  left={(props) => (
                   item.avatar && Array.from(item.avatar).length === 1 ? (
                     <View style={styles.avatarContainer}>
                       <Text style={styles.avatarEmoji}>{item.avatar}</Text>
@@ -161,7 +157,8 @@ export default function ContactsListScreen({ navigation }: any) {
                 style={styles.contactItem}
               />
             </TouchableOpacity>
-          )}
+            );
+          }}
           renderSectionHeader={({ section: { title } }) => (
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionHeaderText}>{title}</Text>

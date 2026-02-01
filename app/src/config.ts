@@ -6,7 +6,7 @@
 
 export const BACKEND_URL = __DEV__
   ? 'http://192.168.68.61:3001'  // Cowork WiFi IP
-  : 'https://mukon-backend.fly.dev';  // Production URL (deploy later)
+  : 'https://backend-rough-bird-7310.fly.dev';  // Production URL
 
 // Solana RPC configuration
 // Using Helius for reliable devnet access (free tier: 1M credits/day)

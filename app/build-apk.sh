@@ -18,6 +18,16 @@ if [ "$VARIANT" = "release" ]; then
   GRADLE_TASK="assembleRelease"
   APK_NAME="mukon-release.apk"
   SOURCE_PATH="android/app/build/outputs/apk/release/app-release.apk"
+
+  # Bundle JS for release using Expo
+  echo "📦 Bundling JavaScript with Expo..."
+  mkdir -p android/app/src/main/assets
+
+  # Export the app bundle
+  npx expo export:embed --platform android --entry-file index.js --bundle-output android/app/src/main/assets/index.android.bundle --dev false
+
+  echo "✅ JavaScript bundled"
+  echo ""
 else
   echo "🐛 Building DEBUG APK..."
   GRADLE_TASK="assembleDebug"

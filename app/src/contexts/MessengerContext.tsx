@@ -253,6 +253,31 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     persistReadTimestamps();
   }, [readTimestamps, wallet?.publicKey]);
 
+  // Load cached profile immediately on mount to prevent showing register screen (Fix: wallet persistence)
+  useEffect(() => {
+    if (!wallet?.publicKey) return;
+
+    const loadCachedProfile = async () => {
+      try {
+        const cached = await AsyncStorage.getItem(`@mukon_profile_${wallet.publicKey.toBase58()}`);
+        if (cached) {
+          const { displayName, avatarUrl, encryptionPublicKey } = JSON.parse(cached);
+          console.log('📱 Loaded cached profile from storage');
+          setProfile({
+            displayName,
+            avatarUrl,
+            publicKey: wallet.publicKey,
+            encryptionPublicKey,
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to load cached profile:', error);
+      }
+    };
+
+    loadCachedProfile();
+  }, [wallet?.publicKey]);
+
   // Load persisted group keys on mount (Fix 2e)
   useEffect(() => {
     if (!wallet?.publicKey) return;
@@ -1348,12 +1373,28 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       console.log('Profile loaded:', { displayName, avatarUrl, encryptionPublicKey });
 
-      setProfile({
+      const profileData = {
         displayName,
         avatarUrl: avatarUrl || null,
         publicKey: wallet.publicKey,
         encryptionPublicKey,
-      });
+      };
+
+      setProfile(profileData);
+
+      // Cache profile to prevent showing register screen on app restart
+      try {
+        await AsyncStorage.setItem(
+          `@mukon_profile_${wallet.publicKey.toBase58()}`,
+          JSON.stringify({
+            displayName,
+            avatarUrl: avatarUrl || null,
+            encryptionPublicKey,
+          })
+        );
+      } catch (cacheError) {
+        console.warn('Failed to cache profile:', cacheError);
+      }
     } catch (error) {
       console.error('Failed to load profile:', error);
       setProfile(null);
