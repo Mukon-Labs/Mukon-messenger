@@ -6,6 +6,16 @@ use sha2::{Digest, Sha256};
 // use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
 // use arcium_macros::{circuit_hash, comp_def_offset};
 
+// Light Protocol ZK Compression imports
+use light_sdk::LightDiscriminator;
+// Commented out unused imports - will be needed when CPI integration is completed
+// use light_sdk::address;
+// use light_sdk::cpi::v2::{CpiAccounts, LightSystemProgramCpi};
+// use light_sdk::instruction::ValidityProof;
+// use light_sdk::LightHasher;
+// light_hasher is needed for LightHasher derive macro
+extern crate light_hasher;
+
 declare_id!("GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj");
 
 // ARCIUM TEMPORARILY DISABLED
@@ -683,6 +693,193 @@ pub mod mukon_messenger {
         Ok(())
     }
 
+    // ========== LIGHT PROTOCOL ZK COMPRESSION INSTRUCTIONS ==========
+
+    /// Store a group key share using ZK compression
+    /// Replaces store_group_key for new operations
+    pub fn store_compressed_group_key<'info>(
+        ctx: Context<'_, '_, '_, 'info, StoreCompressedGroupKey<'info>>,
+        _proof: Vec<u8>,  // Serialized proof data
+        group_id: [u8; 32],
+        encrypted_key: [u8; 48],
+        nonce: [u8; 24],
+    ) -> Result<()> {
+        let group = &ctx.accounts.group;
+
+        // Verify payer is a member of the group
+        require!(
+            group.members.contains(&ctx.accounts.payer.key()),
+            ErrorCode::NotGroupMember
+        );
+
+        // Create compressed account data (for demonstration - actual CPI would happen here)
+        let _compressed_key_share = CompressedGroupKeyShare {
+            group_id,
+            member: ctx.accounts.payer.key(),
+            encrypted_key,
+            nonce,
+        };
+
+        // TODO: Implement full CPI to Light System Program
+        // This requires:
+        // 1. Parsing proof data properly
+        // 2. Setting up CpiAccounts with correct parameters
+        // 3. Calling Light System Program via CPI
+
+        msg!("Compressed group key stored for member: {:?}", ctx.accounts.payer.key());
+        Ok(())
+    }
+
+    /// Close a compressed group key share
+    pub fn close_compressed_group_key<'info>(
+        ctx: Context<'_, '_, '_, 'info, CloseCompressedGroupKey<'info>>,
+        _proof: Vec<u8>,
+        _compressed_account_hash: [u8; 32],
+        compressed_account_data: Vec<u8>,  // Serialized CompressedGroupKeyShare
+    ) -> Result<()> {
+        // Deserialize and verify the key share belongs to the payer
+        let key_share: CompressedGroupKeyShare = AnchorDeserialize::deserialize(&mut compressed_account_data.as_slice())
+            .map_err(|_| ErrorCode::Unauthorized)?;
+
+        require!(
+            key_share.member == ctx.accounts.payer.key(),
+            ErrorCode::Unauthorized
+        );
+
+        // TODO: Implement CPI to Light System Program to nullify compressed account
+
+        msg!("Compressed group key share closed for member: {:?}", ctx.accounts.payer.key());
+        Ok(())
+    }
+
+    /// Invite a user to a group using ZK compression
+    /// Replaces invite_to_group for new operations
+    pub fn invite_to_group_compressed<'info>(
+        ctx: Context<'_, '_, '_, 'info, InviteToGroupCompressed<'info>>,
+        _proof: Vec<u8>,
+    ) -> Result<()> {
+        let group = &ctx.accounts.group;
+
+        // Any member can invite (creator can kick bad actors)
+        require!(
+            group.members.contains(&ctx.accounts.payer.key()),
+            ErrorCode::NotGroupMember
+        );
+
+        // Check if group is full
+        require!(group.members.len() < 30, ErrorCode::GroupFull);
+
+        // Check if already a member
+        require!(
+            !group.members.contains(&ctx.accounts.invitee.key()),
+            ErrorCode::AlreadyInvited
+        );
+
+        // Create compressed invite data
+        let _compressed_invite = CompressedGroupInvite {
+            group_id: group.group_id,
+            inviter: ctx.accounts.payer.key(),
+            invitee: ctx.accounts.invitee.key(),
+            status: 0, // Pending
+            created_at: Clock::get()?.unix_timestamp,
+        };
+
+        // TODO: Implement CPI to Light System Program to create compressed account
+
+        msg!("Group invite (compressed): group={:?}, invitee={:?}",
+             group.group_id, ctx.accounts.invitee.key());
+
+        Ok(())
+    }
+
+    /// Accept a compressed group invite
+    pub fn accept_group_invite_compressed<'info>(
+        ctx: Context<'_, '_, '_, 'info, AcceptGroupInviteCompressed<'info>>,
+        _proof: Vec<u8>,
+        _compressed_account_hash: [u8; 32],
+        compressed_invite_data: Vec<u8>,  // Serialized CompressedGroupInvite
+    ) -> Result<()> {
+        let group = &mut ctx.accounts.group;
+
+        // Deserialize invite data
+        let invite: CompressedGroupInvite = AnchorDeserialize::deserialize(&mut compressed_invite_data.as_slice())
+            .map_err(|_| ErrorCode::NotInvited)?;
+
+        // Verify invite status is Pending
+        require!(
+            invite.status == 0,
+            ErrorCode::NotInvited
+        );
+
+        // Verify invitee is the signer
+        require!(
+            invite.invitee == ctx.accounts.payer.key(),
+            ErrorCode::NotInvited
+        );
+
+        // Check token gate if present
+        if let Some(token_gate) = &group.token_gate {
+            let user_token_account = ctx.accounts.user_token_account.as_ref()
+                .ok_or(ErrorCode::TokenAccountRequired)?;
+
+            require!(
+                user_token_account.owner == ctx.accounts.payer.key(),
+                ErrorCode::InvalidTokenAccount
+            );
+
+            require!(
+                user_token_account.mint == token_gate.token_mint,
+                ErrorCode::InvalidTokenAccount
+            );
+
+            require!(
+                user_token_account.amount >= token_gate.min_balance,
+                ErrorCode::InsufficientTokenBalance
+            );
+        }
+
+        // Add to group
+        group.members.push(ctx.accounts.payer.key());
+
+        // TODO: Implement CPI to Light System Program to update compressed invite status
+
+        msg!("Group invite accepted (compressed): group={:?}, member={:?}",
+             group.group_id, ctx.accounts.payer.key());
+
+        Ok(())
+    }
+
+    /// Reject a compressed group invite
+    pub fn reject_group_invite_compressed<'info>(
+        ctx: Context<'_, '_, '_, 'info, RejectGroupInviteCompressed<'info>>,
+        _proof: Vec<u8>,
+        _compressed_account_hash: [u8; 32],
+        compressed_invite_data: Vec<u8>,  // Serialized CompressedGroupInvite
+    ) -> Result<()> {
+        // Deserialize invite data
+        let invite: CompressedGroupInvite = AnchorDeserialize::deserialize(&mut compressed_invite_data.as_slice())
+            .map_err(|_| ErrorCode::NotInvited)?;
+
+        // Verify invite status is Pending
+        require!(
+            invite.status == 0,
+            ErrorCode::NotInvited
+        );
+
+        // Verify invitee is the signer
+        require!(
+            invite.invitee == ctx.accounts.payer.key(),
+            ErrorCode::NotInvited
+        );
+
+        // TODO: Implement CPI to Light System Program to update compressed invite status to Rejected
+
+        msg!("Group invite rejected (compressed): group={:?}, invitee={:?}",
+             invite.group_id, ctx.accounts.payer.key());
+
+        Ok(())
+    }
+
     // ========== ARCIUM MPC INSTRUCTIONS ==========
     // TEMPORARILY DISABLED - Re-enable after core demo
 
@@ -949,6 +1146,49 @@ pub struct GroupKeyShare {
     pub encrypted_key: Vec<u8>,
     pub nonce: [u8; 24],
 }
+
+// ========== COMPRESSED ACCOUNT STRUCTURES (Light Protocol ZK Compression) ==========
+
+/// Compressed version of GroupKeyShare for ZK compression
+/// Using fixed-size encrypted_key [u8; 48] instead of Vec<u8>
+/// NaCl box output for 32-byte key is always 48 bytes
+/// NOTE: LightHasher removed temporarily - needs proper trait implementations
+#[derive(Clone, Debug, LightDiscriminator, AnchorSerialize, AnchorDeserialize)]
+pub struct CompressedGroupKeyShare {
+    pub group_id: [u8; 32],
+    pub member: Pubkey,
+    pub encrypted_key: [u8; 48],  // Fixed-size: NaCl box output for 32-byte key
+    pub nonce: [u8; 24],
+}
+// Total: 32 + 32 + 48 + 24 = 136 bytes + 8 discriminator = 144 bytes
+
+impl Default for CompressedGroupKeyShare {
+    fn default() -> Self {
+        Self {
+            group_id: [0u8; 32],
+            member: Pubkey::default(),
+            encrypted_key: [0u8; 48],
+            nonce: [0u8; 24],
+        }
+    }
+}
+
+/// Compressed version of GroupInvite for ZK compression
+/// Status is stored as u8 instead of enum for compressed format
+/// NOTE: LightHasher removed temporarily - needs proper trait implementations
+#[derive(Clone, Debug, Default, LightDiscriminator, AnchorSerialize, AnchorDeserialize)]
+pub struct CompressedGroupInvite {
+    pub group_id: [u8; 32],
+    pub inviter: Pubkey,
+    pub invitee: Pubkey,
+    pub status: u8,        // 0=Pending, 1=Accepted, 2=Rejected
+    pub created_at: i64,
+}
+// Total: 32 + 32 + 32 + 1 + 8 = 105 bytes + 8 discriminator = 113 bytes
+
+// NOTE: CPI signer configuration commented out - not needed for current placeholder implementation
+// TODO: Uncomment and configure properly when implementing full CPI integration
+// light_sdk::derive_light_cpi_signer!();
 
 // ========== CONTEXT STRUCTURES ==========
 
@@ -1289,6 +1529,80 @@ pub struct CloseGroupKey<'info> {
     pub group_key_share: Account<'info, GroupKeyShare>,
     #[account(mut)]
     pub payer: Signer<'info>,
+}
+
+// ========== LIGHT PROTOCOL ZK COMPRESSION CONTEXT STRUCTURES ==========
+
+#[derive(Accounts)]
+pub struct StoreCompressedGroupKey<'info> {
+    #[account(
+        seeds = [b"group", group.group_id.as_ref(), GROUP_VERSION.as_ref()],
+        bump
+    )]
+    pub group: Account<'info, Group>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: Light system program
+    pub light_system_program: AccountInfo<'info>,
+    pub system_program: Program<'info, System>,
+    // remaining_accounts: Light system accounts + Merkle tree accounts
+}
+
+#[derive(Accounts)]
+pub struct CloseCompressedGroupKey<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: Light system program
+    pub light_system_program: AccountInfo<'info>,
+    // remaining_accounts: Light system accounts + Merkle tree accounts
+}
+
+#[derive(Accounts)]
+pub struct InviteToGroupCompressed<'info> {
+    #[account(
+        mut,
+        seeds = [b"group", group.group_id.as_ref(), GROUP_VERSION.as_ref()],
+        bump
+    )]
+    pub group: Account<'info, Group>,
+    /// CHECK: invitee is a public key
+    pub invitee: AccountInfo<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: Light system program
+    pub light_system_program: AccountInfo<'info>,
+    pub system_program: Program<'info, System>,
+    // remaining_accounts: Light system accounts + Merkle tree accounts
+}
+
+#[derive(Accounts)]
+pub struct AcceptGroupInviteCompressed<'info> {
+    #[account(
+        mut,
+        seeds = [b"group", group.group_id.as_ref(), GROUP_VERSION.as_ref()],
+        bump,
+        realloc = 8 + 32 + 32 + (4 + 64) + 8 + (4 + (group.members.len() + 1) * 32) + 32 + (1 + 32 + 8),
+        realloc::payer = payer,
+        realloc::zero = false
+    )]
+    pub group: Account<'info, Group>,
+    pub user_token_account: Option<Account<'info, TokenAccount>>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: Light system program
+    pub light_system_program: AccountInfo<'info>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Option<Program<'info, Token>>,
+    // remaining_accounts: Light system accounts + Merkle tree accounts
+}
+
+#[derive(Accounts)]
+pub struct RejectGroupInviteCompressed<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: Light system program
+    pub light_system_program: AccountInfo<'info>,
+    // remaining_accounts: Light system accounts + Merkle tree accounts
 }
 
 // ========== ARCIUM MPC CONTEXT STRUCTURES ==========

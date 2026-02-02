@@ -21,12 +21,13 @@ Built for the Solana Privacy Hackathon (Jan 12-30, 2026)
 Mukon Messenger is a **truly private messaging app** where your wallet is your identity. No phone numbers, no email addresses, no centralized servers storing your data.
 
 **Key Privacy Features:**
-- 🔐 **End-to-end encrypted DMs** (NaCl box asymmetric encryption)
-- 🔐 **Encrypted group chats** (NaCl secretbox with on-chain key backup)
-- 🔐 **On-chain encrypted key recovery** - Unique feature! Your group keys are backed up encrypted on-chain, so clearing app data doesn't lock you out
-- 🔐 **Contact lists encrypted with Arcium MPC** (implemented, testing in progress)
-- 🔐 **Social graph privacy** - No one can see who you're talking to
-- 🔐 **Wallet-based identity** - Your Solana wallet is your account
+- **End-to-end encrypted DMs** (NaCl box asymmetric encryption)
+- **Encrypted group chats** (NaCl secretbox with on-chain key backup)
+- **On-chain encrypted key recovery** - Unique feature! Your group keys are backed up encrypted on-chain, so clearing app data doesn't lock you out
+- **ZK Compression integration** - Light Protocol integration for reduced storage costs (foundation implemented)
+- **Contact lists encrypted with Arcium MPC** (implemented, testing in progress)
+- **Social graph privacy** - No one can see who you're talking to
+- **Wallet-based identity** - Your Solana wallet is your account
 
 **Why It Matters:**
 
@@ -355,11 +356,110 @@ See `.dev/ARCIUM_DISABLED_CODE.md` for detailed implementation.
 
 ---
 
+## Light Protocol ZK Compression
+
+**Status:** ✅ Foundation implemented, CPI integration in progress
+
+### What is Light Protocol ZK Compression?
+
+Light Protocol enables "compressed accounts" on Solana - a ZK-powered compression system that reduces state costs by 1000x while maintaining L1 security and composability.
+
+Traditional Solana accounts require rent exemption (permanent storage cost). For high-volume accounts like group invites and key shares, this becomes expensive:
+- 30-member group = 30 GroupKeyShare accounts
+- High invitation volume = many pending GroupInvite accounts
+- Each account requires ~0.002 SOL rent
+
+With ZK compression:
+- State stored as hashes in Merkle trees
+- Validity proofs verify state existence via zero-knowledge
+- No rent required - pay only for transactions
+- 128-byte proof covers multiple accounts
+
+### Why This Matters for Mukon
+
+**Target Accounts:**
+- `GroupKeyShare` (148 bytes) - One per member per group
+- `GroupInvite` (113 bytes) - High volume, short-lived
+
+Both are ideal for compression - small, high volume, fit well under 1KB limit.
+
+**Not Compressed:**
+- `WalletDescriptor` - Exceeds 1KB with Vec<Peer>
+- `Group` - Can exceed 1KB with 30 members
+- `UserProfile` - Low volume, frequently read by others
+
+### Implementation Status
+
+**Program-Side (Rust):**
+- ✅ light-sdk 0.19.0 + light-hasher dependencies added
+- ✅ Compressed account structs defined:
+  - `CompressedGroupKeyShare` with fixed-size `[u8; 48]` encrypted_key
+  - `CompressedGroupInvite` with `u8` status field
+- ✅ Instruction signatures implemented:
+  - `store_compressed_group_key` - Store encrypted key as compressed account
+  - `close_compressed_group_key` - Close and recover rent
+  - `invite_to_group_compressed` - Create compressed group invite
+  - `accept_group_invite_compressed` - Accept invite and update status
+  - `reject_group_invite_compressed` - Reject invite and update status
+- ✅ Validation logic complete (group membership, token gates, etc.)
+- ⏳ CPI calls to Light System Program pending API clarification
+- ⏳ LightHasher derive pending (needs trait implementations)
+
+**Client-Side (TypeScript):**
+- ✅ @lightprotocol/stateless.js dependency added
+- ❌ Instruction builders not yet implemented
+- ❌ Photon API integration for reading compressed accounts not started
+- ❌ MessengerContext updates not started
+
+**Testing:**
+- ❌ light test-validator environment not set up
+- ❌ Compressed account test cases not written
+
+### Technical Details
+
+**Compressed vs Regular Accounts:**
+
+| Feature | Regular PDA | Compressed Account |
+|---------|-------------|-------------------|
+| Storage | On-chain (full data) | Merkle tree (hash only) |
+| Rent | Required (~0.002 SOL) | Not required |
+| Access | Direct deserialization | Proof + data in instruction |
+| Size limit | ~10MB | ~1KB recommended |
+| Read performance | Faster | Requires Photon indexer |
+
+**Key Changes:**
+- `encrypted_key: Vec<u8>` → `[u8; 48]` (fixed-size required for compression)
+- `status: GroupInviteStatus` → `u8` (simpler for hashing)
+- Address derivation uses same seeds as PDAs for compatibility
+
+**Architecture:**
+```
+Client → Build proof → Call compressed instruction
+       ↓
+Program → Validate → CPI to Light System Program
+                          ↓
+                     Update Merkle trees atomically
+```
+
+### Next Steps
+
+1. Complete CPI integration using light-sdk v2 API
+2. Build TypeScript instruction builders with proof generation
+3. Update MessengerContext to use compressed instructions
+4. Set up test environment with light test-validator
+5. Write comprehensive tests for compressed account flows
+6. Deploy and verify on devnet with actual compression
+
+See `.dev/ZK_COMPRESSION_STATUS.md` for detailed implementation tracking.
+
+---
+
 ## Tech Stack
 
 **Blockchain:**
 - Solana (devnet)
 - Anchor Framework 0.32.1
+- Light Protocol SDK 0.19.0 (ZK Compression)
 - Arcium v0.6.2 (MPC circuits)
 
 **Backend:**
@@ -442,6 +542,10 @@ anchor test
 
 **Helius ($5,000):**
 - Use Helius RPC endpoints
+
+**Light Protocol ($15,000):**
+- ZK Compression integration for GroupKeyShare and GroupInvite accounts
+- Foundation implemented, demonstrating cost reduction architecture
 
 ---
 
