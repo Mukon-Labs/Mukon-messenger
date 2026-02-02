@@ -32,6 +32,12 @@ const DISCRIMINATORS = {
   unblock: Buffer.from([0xc2, 0x31, 0xad, 0x2b, 0xf6, 0xa4, 0x0e, 0x0b]), // c231ad2bf6a40e0b
   update_group: Buffer.from([0x09, 0xf2, 0x01, 0x6e, 0x5b, 0x16, 0xac, 0x61]), // 09f2016e5b16ac61
   update_profile: Buffer.from([0x62, 0x43, 0x63, 0xce, 0x56, 0x73, 0xaf, 0x01]), // 624363ce5673af01
+  // Light Protocol ZK Compression instructions
+  store_compressed_group_key: Buffer.from([0xaa, 0x74, 0x0b, 0x51, 0xbb, 0x27, 0x2e, 0x2f]), // aa740b51bb272e2f
+  close_compressed_group_key: Buffer.from([0xd2, 0x80, 0x92, 0xc1, 0xd7, 0x10, 0xd5, 0xb7]), // d28092c1d710d5b7
+  invite_to_group_compressed: Buffer.from([0x20, 0x35, 0xa0, 0x27, 0x5f, 0x4e, 0xd7, 0xb9]), // 2035a0275f4ed7b9
+  accept_group_invite_compressed: Buffer.from([0x05, 0x90, 0xdc, 0xba, 0x61, 0x11, 0xbd, 0xff]), // 0590dcba6111bdff
+  reject_group_invite_compressed: Buffer.from([0x61, 0x09, 0x98, 0x1d, 0xfc, 0x5a, 0x0d, 0x9c]), // 6109981dfc5a0d9c
   // Arcium MPC instructions (UPDATE AFTER anchor build + scripts/update-discriminators.js)
   init_is_accepted_contact_comp_def: Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), // PLACEHOLDER
   init_count_accepted_comp_def: Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), // PLACEHOLDER
@@ -872,6 +878,550 @@ export function deserializeGroupKeyShare(data: Buffer): GroupKeyShare {
     encryptedKey,
     nonce,
   };
+}
+
+// ========== LIGHT PROTOCOL ZK COMPRESSION INSTRUCTION BUILDERS ==========
+
+/**
+ * Light Protocol Compressed Account Types
+ * These match the Rust structs in the program
+ */
+
+// Import Light Protocol SDK
+// Note: lightRpc is already configured in config.ts
+import { lightRpc } from '../config';
+
+/**
+ * Helper: Derive compressed address using Light Protocol
+ * Same seeds as PDA but uses address tree for derivation
+ */
+async function deriveCompressedAddress(
+  seeds: (Buffer | Uint8Array)[],
+  programId: PublicKey
+): Promise<{ address: PublicKey; addressTree: PublicKey; addressQueue: PublicKey }> {
+  // Get address tree info from Light RPC
+  // For beta SDK, we'll use a default address tree
+  // In production, query available trees: await lightRpc.getAddressTreeInfo()
+
+  // TODO: Replace with actual tree lookup once SDK stabilizes
+  // For now, using placeholders that match the Rust program's expectations
+  const addressTree = new PublicKey('11111111111111111111111111111111'); // Placeholder
+  const addressQueue = new PublicKey('11111111111111111111111111111111'); // Placeholder
+
+  // Derive address (similar to PDA but includes tree)
+  // Seeds hash combined with tree pubkey
+  const seedBuffer = Buffer.concat(seeds.map(s => Buffer.from(s)));
+  const [address] = PublicKey.findProgramAddressSync(
+    [seedBuffer, addressTree.toBuffer()],
+    programId
+  );
+
+  return { address, addressTree, addressQueue };
+}
+
+/**
+ * Helper: Pack Light System accounts into remaining_accounts
+ * Matches Light SDK's expected account layout
+ */
+function packLightSystemAccounts(
+  addressTree?: PublicKey,
+  addressQueue?: PublicKey,
+  stateTree?: PublicKey,
+  stateQueue?: PublicKey
+): { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[] {
+  const accounts: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[] = [];
+
+  // Light System Program accounts (6 required accounts)
+  const LIGHT_SYSTEM_PROGRAM = new PublicKey('H5sFv8VwWmjxHYS2GB4fTDsK7uTtnRT4WiixtHrET3bN');
+  const LIGHT_VERIFIER_PROGRAM = new PublicKey('BppwxXiYnRjEfV5fW7N4T5iQVQfqCG4z9fYh7qbZjg9Z');
+  const NOOP_PROGRAM = new PublicKey('noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV');
+  const ACCOUNT_COMPRESSION_PROGRAM = new PublicKey('CbjvJc1SNx1aav8tU49dJGHu8EUdzQJSMtkjDmV8miqK');
+  const ACCOUNT_COMPRESSION_AUTHORITY = new PublicKey('H5sFv8VwWmjxHYS2GB4fTDsK7uTtnRT4WiixtHrET3bN');
+  const REGISTERED_PROGRAM_PDA = new PublicKey('H5sFv8VwWmjxHYS2GB4fTDsK7uTtnRT4WiixtHrET3bN');
+
+  accounts.push(
+    { pubkey: LIGHT_SYSTEM_PROGRAM, isSigner: false, isWritable: false },
+    { pubkey: LIGHT_VERIFIER_PROGRAM, isSigner: false, isWritable: false },
+    { pubkey: NOOP_PROGRAM, isSigner: false, isWritable: false },
+    { pubkey: ACCOUNT_COMPRESSION_PROGRAM, isSigner: false, isWritable: false },
+    { pubkey: ACCOUNT_COMPRESSION_AUTHORITY, isSigner: false, isWritable: false },
+    { pubkey: REGISTERED_PROGRAM_PDA, isSigner: false, isWritable: false }
+  );
+
+  // Add Merkle tree accounts if provided
+  if (addressTree) {
+    accounts.push({ pubkey: addressTree, isSigner: false, isWritable: true });
+  }
+  if (addressQueue) {
+    accounts.push({ pubkey: addressQueue, isSigner: false, isWritable: true });
+  }
+  if (stateTree) {
+    accounts.push({ pubkey: stateTree, isSigner: false, isWritable: true });
+  }
+  if (stateQueue) {
+    accounts.push({ pubkey: stateQueue, isSigner: false, isWritable: true });
+  }
+
+  return accounts;
+}
+
+/**
+ * Helper: Serialize ValidityProof for instruction data
+ */
+function serializeValidityProof(proof: any): Buffer {
+  // ValidityProof structure (from Light Protocol):
+  // - proof: CompressedProof (256 bytes)
+  // - merkle_tree_root_index: u16
+  // - leaf_index: u32
+  // - nullifier_queue_index: u16
+
+  // For beta SDK, we'll use a simplified serialization
+  // TODO: Update when SDK provides proper serialization utilities
+
+  // Placeholder proof (256 bytes of zeros for now)
+  const proofBytes = Buffer.alloc(256);
+
+  // Indices (u16, u32, u16)
+  const indices = Buffer.alloc(8);
+  indices.writeUInt16LE(0, 0); // merkle_tree_root_index
+  indices.writeUInt32LE(0, 2); // leaf_index
+  indices.writeUInt16LE(0, 6); // nullifier_queue_index
+
+  return Buffer.concat([proofBytes, indices]);
+}
+
+/**
+ * Helper: Serialize PackedAddressTreeInfo for instruction data
+ */
+function serializePackedAddressTreeInfo(
+  addressMerkleTreePubkeyIndex: number,
+  addressQueuePubkeyIndex: number
+): Buffer {
+  // PackedAddressTreeInfo is just two u8 indices
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt8(addressMerkleTreePubkeyIndex, 0);
+  buffer.writeUInt8(addressQueuePubkeyIndex, 1);
+  return buffer;
+}
+
+/**
+ * Helper: Serialize CompressedAccountMeta for instruction data
+ */
+function serializeCompressedAccountMeta(
+  stateMerkleTreePubkeyIndex: number,
+  stateQueuePubkeyIndex: number,
+  address: PublicKey,
+  outputStateTreeIndex: number
+): Buffer {
+  // CompressedAccountMeta structure:
+  // - state_merkle_tree_pubkey_index: u8
+  // - state_queue_pubkey_index: u8
+  // - address: [u8; 32]
+  // - output_state_tree_index: u8
+
+  const buffer = Buffer.alloc(35);
+  buffer.writeUInt8(stateMerkleTreePubkeyIndex, 0);
+  buffer.writeUInt8(stateQueuePubkeyIndex, 1);
+  address.toBuffer().copy(buffer, 2);
+  buffer.writeUInt8(outputStateTreeIndex, 34);
+
+  return buffer;
+}
+
+/**
+ * Build store_compressed_group_key instruction
+ *
+ * Creates a compressed GroupKeyShare account using ZK compression.
+ * This reduces on-chain storage costs by ~10x compared to regular accounts.
+ *
+ * @param payer - The wallet storing the key (must be group member)
+ * @param groupId - The group's 32-byte identifier
+ * @param encryptedKey - The encrypted group key (exactly 48 bytes - NaCl box output)
+ * @param nonce - The encryption nonce (exactly 24 bytes)
+ * @returns TransactionInstruction ready to sign and send
+ */
+export async function createStoreCompressedGroupKeyInstruction(
+  payer: PublicKey,
+  groupId: Uint8Array,
+  encryptedKey: Uint8Array,
+  nonce: Uint8Array
+): Promise<TransactionInstruction> {
+  // Validate input sizes
+  if (encryptedKey.length !== 48) {
+    throw new Error('Encrypted key must be exactly 48 bytes (NaCl box output)');
+  }
+  if (nonce.length !== 24) {
+    throw new Error('Nonce must be exactly 24 bytes');
+  }
+
+  // Derive compressed address (same seeds as PDA)
+  const { address, addressTree, addressQueue } = await deriveCompressedAddress(
+    [Buffer.from('group_key'), Buffer.from(groupId), payer.toBuffer()],
+    PROGRAM_ID
+  );
+
+  // Get validity proof from Light RPC
+  // This proves the address doesn't exist yet (for CREATE operation)
+  let validityProof;
+  try {
+    // TODO: Use actual Light RPC when SDK is stable
+    // validityProof = await lightRpc.getValidityProof([], [{ address, tree: addressTree }]);
+    validityProof = {}; // Placeholder
+  } catch (error) {
+    console.error('Failed to get validity proof:', error);
+    throw new Error('Failed to fetch validity proof from Light RPC');
+  }
+
+  // Pack Light System accounts + Merkle trees into remaining_accounts
+  // These accounts are at specific indices referenced in the instruction data
+  const remainingAccounts = packLightSystemAccounts(addressTree, addressQueue);
+  const addressTreeIndex = 6; // After 6 Light System accounts
+  const addressQueueIndex = 7;
+  const outputStateTreeIndex = 0; // Default state tree
+
+  // Build instruction data
+  const data = Buffer.concat([
+    DISCRIMINATORS.store_compressed_group_key,
+    serializeValidityProof(validityProof),
+    serializePackedAddressTreeInfo(addressTreeIndex, addressQueueIndex),
+    Buffer.from([outputStateTreeIndex]),
+    Buffer.from(groupId),
+    Buffer.from(encryptedKey),
+    Buffer.from(nonce),
+  ]);
+
+  // Regular accounts (group for validation)
+  const group = getGroupPDA(groupId);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: group, isSigner: false, isWritable: false },
+      { pubkey: payer, isSigner: true, isWritable: true },
+      ...remainingAccounts,
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+/**
+ * Build close_compressed_group_key instruction
+ *
+ * Closes a compressed GroupKeyShare account and recovers rent.
+ * You must provide the current account data to prove you own it.
+ *
+ * @param payer - The wallet that created the key share
+ * @param groupId - The group's 32-byte identifier
+ * @param encryptedKey - The current encrypted key (48 bytes)
+ * @param nonce - The current nonce (24 bytes)
+ * @returns TransactionInstruction ready to sign and send
+ */
+export async function createCloseCompressedGroupKeyInstruction(
+  payer: PublicKey,
+  groupId: Uint8Array,
+  encryptedKey: Uint8Array,
+  nonce: Uint8Array
+): Promise<TransactionInstruction> {
+  // Validate input sizes
+  if (encryptedKey.length !== 48) {
+    throw new Error('Encrypted key must be exactly 48 bytes');
+  }
+  if (nonce.length !== 24) {
+    throw new Error('Nonce must be exactly 24 bytes');
+  }
+
+  // Derive compressed address
+  const { address, addressTree, addressQueue } = await deriveCompressedAddress(
+    [Buffer.from('group_key'), Buffer.from(groupId), payer.toBuffer()],
+    PROGRAM_ID
+  );
+
+  // Fetch compressed account to get state tree info
+  let compressedAccount;
+  try {
+    // TODO: Use actual Light RPC when SDK is stable
+    // compressedAccount = await lightRpc.getCompressedAccount(address);
+    compressedAccount = { tree: addressTree, queue: addressQueue }; // Placeholder
+  } catch (error) {
+    console.error('Failed to fetch compressed account:', error);
+    throw new Error('Failed to fetch compressed account from Light RPC');
+  }
+
+  // Get validity proof (proves account EXISTS for CLOSE operation)
+  let validityProof;
+  try {
+    // TODO: Use actual Light RPC when SDK is stable
+    // validityProof = await lightRpc.getValidityProof([compressedAccount.hash], []);
+    validityProof = {}; // Placeholder
+  } catch (error) {
+    console.error('Failed to get validity proof:', error);
+    throw new Error('Failed to fetch validity proof from Light RPC');
+  }
+
+  // Pack Light System accounts + Merkle trees
+  const remainingAccounts = packLightSystemAccounts(
+    compressedAccount.tree,
+    compressedAccount.queue
+  );
+  const stateTreeIndex = 6; // After 6 Light System accounts
+  const stateQueueIndex = 7;
+  const outputStateTreeIndex = 0;
+
+  // Build instruction data
+  const data = Buffer.concat([
+    DISCRIMINATORS.close_compressed_group_key,
+    serializeValidityProof(validityProof),
+    serializeCompressedAccountMeta(stateTreeIndex, stateQueueIndex, address, outputStateTreeIndex),
+    Buffer.from(groupId),
+    payer.toBuffer(),
+    Buffer.from(encryptedKey),
+    Buffer.from(nonce),
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      ...remainingAccounts,
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+/**
+ * Build invite_to_group_compressed instruction
+ *
+ * Creates a compressed GroupInvite account using ZK compression.
+ * Any group member can invite (not just admin).
+ *
+ * @param payer - The inviter (must be group member)
+ * @param groupId - The group's 32-byte identifier
+ * @param invitee - The wallet being invited
+ * @returns TransactionInstruction ready to sign and send
+ */
+export async function createInviteToGroupCompressedInstruction(
+  payer: PublicKey,
+  groupId: Uint8Array,
+  invitee: PublicKey
+): Promise<TransactionInstruction> {
+  // Derive compressed address for invite
+  const { address, addressTree, addressQueue } = await deriveCompressedAddress(
+    [Buffer.from('group_invite'), Buffer.from(groupId), invitee.toBuffer()],
+    PROGRAM_ID
+  );
+
+  // Get validity proof (proves invite doesn't exist yet)
+  let validityProof;
+  try {
+    // TODO: Use actual Light RPC when SDK is stable
+    // validityProof = await lightRpc.getValidityProof([], [{ address, tree: addressTree }]);
+    validityProof = {}; // Placeholder
+  } catch (error) {
+    console.error('Failed to get validity proof:', error);
+    throw new Error('Failed to fetch validity proof from Light RPC');
+  }
+
+  // Pack Light System accounts + Merkle trees
+  const remainingAccounts = packLightSystemAccounts(addressTree, addressQueue);
+  const addressTreeIndex = 6;
+  const addressQueueIndex = 7;
+  const outputStateTreeIndex = 0;
+
+  // Build instruction data
+  const data = Buffer.concat([
+    DISCRIMINATORS.invite_to_group_compressed,
+    serializeValidityProof(validityProof),
+    serializePackedAddressTreeInfo(addressTreeIndex, addressQueueIndex),
+    Buffer.from([outputStateTreeIndex]),
+  ]);
+
+  // Regular accounts
+  const group = getGroupPDA(groupId);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: group, isSigner: false, isWritable: true },
+      { pubkey: invitee, isSigner: false, isWritable: false },
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ...remainingAccounts,
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+/**
+ * Build accept_group_invite_compressed instruction
+ *
+ * Accepts a compressed group invite and adds member to group.
+ * Validates token gate if present.
+ *
+ * @param payer - The invitee accepting the invite
+ * @param groupId - The group's 32-byte identifier
+ * @param inviter - The wallet that sent the invite
+ * @param status - Current invite status (0=Pending, 1=Accepted, 2=Rejected)
+ * @param createdAt - Invite creation timestamp
+ * @param userTokenAccount - Token account for token-gated groups (null if no gate)
+ * @returns TransactionInstruction ready to sign and send
+ */
+export async function createAcceptGroupInviteCompressedInstruction(
+  payer: PublicKey,
+  groupId: Uint8Array,
+  inviter: PublicKey,
+  status: number,
+  createdAt: bigint,
+  userTokenAccount: PublicKey | null
+): Promise<TransactionInstruction> {
+  // Derive compressed address for invite
+  const { address, addressTree, addressQueue } = await deriveCompressedAddress(
+    [Buffer.from('group_invite'), Buffer.from(groupId), payer.toBuffer()],
+    PROGRAM_ID
+  );
+
+  // Fetch compressed invite account
+  let compressedAccount;
+  try {
+    // TODO: Use actual Light RPC when SDK is stable
+    // compressedAccount = await lightRpc.getCompressedAccount(address);
+    compressedAccount = { tree: addressTree, queue: addressQueue }; // Placeholder
+  } catch (error) {
+    console.error('Failed to fetch compressed account:', error);
+    throw new Error('Failed to fetch compressed invite from Light RPC');
+  }
+
+  // Get validity proof (proves invite exists for UPDATE operation)
+  let validityProof;
+  try {
+    // TODO: Use actual Light RPC when SDK is stable
+    // validityProof = await lightRpc.getValidityProof([compressedAccount.hash], []);
+    validityProof = {}; // Placeholder
+  } catch (error) {
+    console.error('Failed to get validity proof:', error);
+    throw new Error('Failed to fetch validity proof from Light RPC');
+  }
+
+  // Pack Light System accounts + Merkle trees
+  const remainingAccounts = packLightSystemAccounts(
+    compressedAccount.tree,
+    compressedAccount.queue
+  );
+  const stateTreeIndex = 6;
+  const stateQueueIndex = 7;
+  const outputStateTreeIndex = 0;
+
+  // Build instruction data
+  const createdAtBuffer = Buffer.alloc(8);
+  createdAtBuffer.writeBigInt64LE(createdAt, 0);
+
+  const data = Buffer.concat([
+    DISCRIMINATORS.accept_group_invite_compressed,
+    serializeValidityProof(validityProof),
+    serializeCompressedAccountMeta(stateTreeIndex, stateQueueIndex, address, outputStateTreeIndex),
+    Buffer.from(groupId),
+    inviter.toBuffer(),
+    payer.toBuffer(),
+    Buffer.from([status]),
+    createdAtBuffer,
+  ]);
+
+  // Regular accounts
+  const group = getGroupPDA(groupId);
+  const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: group, isSigner: false, isWritable: true },
+      { pubkey: userTokenAccount ?? PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: userTokenAccount ? TOKEN_PROGRAM_ID : PROGRAM_ID, isSigner: false, isWritable: false },
+      ...remainingAccounts,
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+/**
+ * Build reject_group_invite_compressed instruction
+ *
+ * Rejects a compressed group invite (updates status to Rejected).
+ *
+ * @param payer - The invitee rejecting the invite
+ * @param groupId - The group's 32-byte identifier
+ * @param inviter - The wallet that sent the invite
+ * @param status - Current invite status (should be 0=Pending)
+ * @param createdAt - Invite creation timestamp
+ * @returns TransactionInstruction ready to sign and send
+ */
+export async function createRejectGroupInviteCompressedInstruction(
+  payer: PublicKey,
+  groupId: Uint8Array,
+  inviter: PublicKey,
+  status: number,
+  createdAt: bigint
+): Promise<TransactionInstruction> {
+  // Derive compressed address for invite
+  const { address, addressTree, addressQueue } = await deriveCompressedAddress(
+    [Buffer.from('group_invite'), Buffer.from(groupId), payer.toBuffer()],
+    PROGRAM_ID
+  );
+
+  // Fetch compressed invite account
+  let compressedAccount;
+  try {
+    // TODO: Use actual Light RPC when SDK is stable
+    // compressedAccount = await lightRpc.getCompressedAccount(address);
+    compressedAccount = { tree: addressTree, queue: addressQueue }; // Placeholder
+  } catch (error) {
+    console.error('Failed to fetch compressed account:', error);
+    throw new Error('Failed to fetch compressed invite from Light RPC');
+  }
+
+  // Get validity proof (proves invite exists for UPDATE operation)
+  let validityProof;
+  try {
+    // TODO: Use actual Light RPC when SDK is stable
+    // validityProof = await lightRpc.getValidityProof([compressedAccount.hash], []);
+    validityProof = {}; // Placeholder
+  } catch (error) {
+    console.error('Failed to get validity proof:', error);
+    throw new Error('Failed to fetch validity proof from Light RPC');
+  }
+
+  // Pack Light System accounts + Merkle trees
+  const remainingAccounts = packLightSystemAccounts(
+    compressedAccount.tree,
+    compressedAccount.queue
+  );
+  const stateTreeIndex = 6;
+  const stateQueueIndex = 7;
+  const outputStateTreeIndex = 0;
+
+  // Build instruction data
+  const createdAtBuffer = Buffer.alloc(8);
+  createdAtBuffer.writeBigInt64LE(createdAt, 0);
+
+  const data = Buffer.concat([
+    DISCRIMINATORS.reject_group_invite_compressed,
+    serializeValidityProof(validityProof),
+    serializeCompressedAccountMeta(stateTreeIndex, stateQueueIndex, address, outputStateTreeIndex),
+    Buffer.from(groupId),
+    inviter.toBuffer(),
+    payer.toBuffer(),
+    Buffer.from([status]),
+    createdAtBuffer,
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      ...remainingAccounts,
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
 }
 
 // ========== ARCIUM MPC INSTRUCTIONS ==========

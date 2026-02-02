@@ -530,22 +530,17 @@ anchor test
 ## Bounty Targets
 
 **Arcium ($10,000):**
-- ✅ Best integration - Encrypted contact lists + group members
-- ✅ Most encrypted potential - 3 circuits implemented, full privacy architecture
+- Best integration - Encrypted contact lists + group members
+- Most encrypted potential - 3 circuits implemented, full privacy architecture
 
 **Open Track ($18,000):**
-- ✅ Privacy messenger with wallet-based identity
-- ✅ On-chain encrypted storage (differentiator)
-
-**ShadowWire/Radr Labs ($15,000):** (Stretch)
-- Private payment splits in group chats
+- Privacy messenger with wallet-based identity
+- On-chain encrypted storage (differentiator)
+- ZK Compression integration for GroupKeyShare and GroupInvite accounts
+- Foundation implemented, demonstrating cost reduction architecture
 
 **Helius ($5,000):**
 - Use Helius RPC endpoints
-
-**Light Protocol ($15,000):**
-- ZK Compression integration for GroupKeyShare and GroupInvite accounts
-- Foundation implemented, demonstrating cost reduction architecture
 
 ---
 
