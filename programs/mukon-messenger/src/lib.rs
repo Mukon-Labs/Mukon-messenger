@@ -7,16 +7,24 @@ use sha2::{Digest, Sha256};
 // use arcium_macros::{circuit_hash, comp_def_offset};
 
 // Light Protocol ZK Compression imports
-use light_sdk::LightDiscriminator;
-// Commented out unused imports - will be needed when CPI integration is completed
-// use light_sdk::address;
-// use light_sdk::cpi::v2::{CpiAccounts, LightSystemProgramCpi};
-// use light_sdk::instruction::ValidityProof;
-// use light_sdk::LightHasher;
-// light_hasher is needed for LightHasher derive macro
-extern crate light_hasher;
+use light_sdk::{
+    account::LightAccount,
+    address::v2::derive_address,
+    cpi::{v2::CpiAccounts, CpiSigner, InvokeLightSystemProgram, LightCpiInstruction},
+    instruction::{
+        account_meta::CompressedAccountMeta,
+        PackedAddressTreeInfo,
+        ValidityProof,
+    },
+    LightDiscriminator,
+    LightHasher,
+};
 
 declare_id!("GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj");
+
+// CPI signer for Light System Program calls
+pub const LIGHT_CPI_SIGNER: CpiSigner =
+    light_sdk::derive_light_cpi_signer!("GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj");
 
 // ARCIUM TEMPORARILY DISABLED
 // const COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT: u32 = comp_def_offset!("is_accepted_contact");
@@ -699,56 +707,109 @@ pub mod mukon_messenger {
     /// Replaces store_group_key for new operations
     pub fn store_compressed_group_key<'info>(
         ctx: Context<'_, '_, '_, 'info, StoreCompressedGroupKey<'info>>,
-        _proof: Vec<u8>,  // Serialized proof data
+        proof: ValidityProof,
+        address_tree_info: PackedAddressTreeInfo,
+        output_state_tree_index: u8,
         group_id: [u8; 32],
         encrypted_key: [u8; 48],
         nonce: [u8; 24],
     ) -> Result<()> {
         let group = &ctx.accounts.group;
 
-        // Verify payer is a member of the group
+        // Verify signer is a member of the group
         require!(
-            group.members.contains(&ctx.accounts.payer.key()),
+            group.members.contains(&ctx.accounts.signer.key()),
             ErrorCode::NotGroupMember
         );
 
-        // Create compressed account data (for demonstration - actual CPI would happen here)
-        let _compressed_key_share = CompressedGroupKeyShare {
-            group_id,
-            member: ctx.accounts.payer.key(),
-            encrypted_key,
-            nonce,
-        };
+        // Set up CPI accounts
+        let light_cpi_accounts = CpiAccounts::new(
+            ctx.accounts.signer.as_ref(),
+            ctx.remaining_accounts,
+            crate::LIGHT_CPI_SIGNER,
+        );
 
-        // TODO: Implement full CPI to Light System Program
-        // This requires:
-        // 1. Parsing proof data properly
-        // 2. Setting up CpiAccounts with correct parameters
-        // 3. Calling Light System Program via CPI
+        // Get address tree account from remaining accounts
+        let address_tree_account = ctx.remaining_accounts
+            .get(address_tree_info.address_merkle_tree_pubkey_index as usize)
+            .ok_or(ErrorCode::Unauthorized)?;
 
-        msg!("Compressed group key stored for member: {:?}", ctx.accounts.payer.key());
+        // Derive address for this key share
+        let (address, address_seed) = derive_address(
+            &[b"group_key", group_id.as_ref(), ctx.accounts.signer.key().as_ref()],
+            address_tree_account.key,
+            &crate::ID,
+        );
+
+        let new_address_params =
+            address_tree_info.into_new_address_params_assigned_packed(address_seed, Some(0));
+
+        // Create new compressed account
+        let mut key_share = LightAccount::<CompressedGroupKeyShare>::new_init(
+            &crate::ID,
+            Some(address),
+            output_state_tree_index,
+        );
+
+        key_share.group_id = group_id;
+        key_share.member = ctx.accounts.signer.key();
+        key_share.encrypted_key = encrypted_key;
+        key_share.nonce = nonce;
+
+        // Invoke Light System Program via CPI
+        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+            .with_light_account(key_share)?
+            .with_new_addresses(&[new_address_params])
+            .invoke(light_cpi_accounts)?;
+
+        msg!("Compressed group key stored for member: {:?}", ctx.accounts.signer.key());
         Ok(())
     }
 
     /// Close a compressed group key share
     pub fn close_compressed_group_key<'info>(
         ctx: Context<'_, '_, '_, 'info, CloseCompressedGroupKey<'info>>,
-        _proof: Vec<u8>,
-        _compressed_account_hash: [u8; 32],
-        compressed_account_data: Vec<u8>,  // Serialized CompressedGroupKeyShare
+        proof: ValidityProof,
+        account_meta: CompressedAccountMeta,
+        group_id: [u8; 32],
+        member: Pubkey,
+        encrypted_key: [u8; 48],
+        nonce: [u8; 24],
     ) -> Result<()> {
-        // Deserialize and verify the key share belongs to the payer
-        let key_share: CompressedGroupKeyShare = AnchorDeserialize::deserialize(&mut compressed_account_data.as_slice())
-            .map_err(|_| ErrorCode::Unauthorized)?;
+        // Reconstruct the account data
+        let key_share_data = CompressedGroupKeyShare {
+            group_id,
+            member,
+            encrypted_key,
+            nonce,
+        };
 
+        // Verify the key share belongs to the signer
         require!(
-            key_share.member == ctx.accounts.payer.key(),
+            key_share_data.member == ctx.accounts.signer.key(),
             ErrorCode::Unauthorized
         );
 
-        // TODO: Implement CPI to Light System Program to nullify compressed account
+        // Create close operation
+        let key_share = LightAccount::<CompressedGroupKeyShare>::new_close(
+            &crate::ID,
+            &account_meta,
+            key_share_data,
+        )?;
 
-        msg!("Compressed group key share closed for member: {:?}", ctx.accounts.payer.key());
+        // Set up CPI accounts
+        let light_cpi_accounts = CpiAccounts::new(
+            ctx.accounts.signer.as_ref(),
+            ctx.remaining_accounts,
+            crate::LIGHT_CPI_SIGNER,
+        );
+
+        // Invoke Light System Program via CPI
+        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+            .with_light_account(key_share)?
+            .invoke(light_cpi_accounts)?;
+
+        msg!("Compressed group key share closed for member: {:?}", ctx.accounts.signer.key());
         Ok(())
     }
 
@@ -756,13 +817,15 @@ pub mod mukon_messenger {
     /// Replaces invite_to_group for new operations
     pub fn invite_to_group_compressed<'info>(
         ctx: Context<'_, '_, '_, 'info, InviteToGroupCompressed<'info>>,
-        _proof: Vec<u8>,
+        proof: ValidityProof,
+        address_tree_info: PackedAddressTreeInfo,
+        output_state_tree_index: u8,
     ) -> Result<()> {
         let group = &ctx.accounts.group;
 
         // Any member can invite (creator can kick bad actors)
         require!(
-            group.members.contains(&ctx.accounts.payer.key()),
+            group.members.contains(&ctx.accounts.signer.key()),
             ErrorCode::NotGroupMember
         );
 
@@ -775,16 +838,46 @@ pub mod mukon_messenger {
             ErrorCode::AlreadyInvited
         );
 
-        // Create compressed invite data
-        let _compressed_invite = CompressedGroupInvite {
-            group_id: group.group_id,
-            inviter: ctx.accounts.payer.key(),
-            invitee: ctx.accounts.invitee.key(),
-            status: 0, // Pending
-            created_at: Clock::get()?.unix_timestamp,
-        };
+        // Set up CPI accounts
+        let light_cpi_accounts = CpiAccounts::new(
+            ctx.accounts.signer.as_ref(),
+            ctx.remaining_accounts,
+            crate::LIGHT_CPI_SIGNER,
+        );
 
-        // TODO: Implement CPI to Light System Program to create compressed account
+        // Get address tree account from remaining accounts
+        let address_tree_account = ctx.remaining_accounts
+            .get(address_tree_info.address_merkle_tree_pubkey_index as usize)
+            .ok_or(ErrorCode::Unauthorized)?;
+
+        // Derive address for this invite
+        let (address, address_seed) = derive_address(
+            &[b"group_invite", group.group_id.as_ref(), ctx.accounts.invitee.key().as_ref()],
+            address_tree_account.key,
+            &crate::ID,
+        );
+
+        let new_address_params =
+            address_tree_info.into_new_address_params_assigned_packed(address_seed, Some(0));
+
+        // Create new compressed invite
+        let mut invite = LightAccount::<CompressedGroupInvite>::new_init(
+            &crate::ID,
+            Some(address),
+            output_state_tree_index,
+        );
+
+        invite.group_id = group.group_id;
+        invite.inviter = ctx.accounts.signer.key();
+        invite.invitee = ctx.accounts.invitee.key();
+        invite.status = 0; // Pending
+        invite.created_at = Clock::get()?.unix_timestamp;
+
+        // Invoke Light System Program via CPI
+        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+            .with_light_account(invite)?
+            .with_new_addresses(&[new_address_params])
+            .invoke(light_cpi_accounts)?;
 
         msg!("Group invite (compressed): group={:?}, invitee={:?}",
              group.group_id, ctx.accounts.invitee.key());
@@ -795,25 +888,34 @@ pub mod mukon_messenger {
     /// Accept a compressed group invite
     pub fn accept_group_invite_compressed<'info>(
         ctx: Context<'_, '_, '_, 'info, AcceptGroupInviteCompressed<'info>>,
-        _proof: Vec<u8>,
-        _compressed_account_hash: [u8; 32],
-        compressed_invite_data: Vec<u8>,  // Serialized CompressedGroupInvite
+        proof: ValidityProof,
+        account_meta: CompressedAccountMeta,
+        group_id: [u8; 32],
+        inviter: Pubkey,
+        invitee: Pubkey,
+        status: u8,
+        created_at: i64,
     ) -> Result<()> {
         let group = &mut ctx.accounts.group;
 
-        // Deserialize invite data
-        let invite: CompressedGroupInvite = AnchorDeserialize::deserialize(&mut compressed_invite_data.as_slice())
-            .map_err(|_| ErrorCode::NotInvited)?;
+        // Reconstruct current invite state
+        let current_invite = CompressedGroupInvite {
+            group_id,
+            inviter,
+            invitee,
+            status,
+            created_at,
+        };
 
         // Verify invite status is Pending
         require!(
-            invite.status == 0,
+            current_invite.status == 0,
             ErrorCode::NotInvited
         );
 
         // Verify invitee is the signer
         require!(
-            invite.invitee == ctx.accounts.payer.key(),
+            current_invite.invitee == ctx.accounts.signer.key(),
             ErrorCode::NotInvited
         );
 
@@ -823,7 +925,7 @@ pub mod mukon_messenger {
                 .ok_or(ErrorCode::TokenAccountRequired)?;
 
             require!(
-                user_token_account.owner == ctx.accounts.payer.key(),
+                user_token_account.owner == ctx.accounts.signer.key(),
                 ErrorCode::InvalidTokenAccount
             );
 
@@ -839,12 +941,30 @@ pub mod mukon_messenger {
         }
 
         // Add to group
-        group.members.push(ctx.accounts.payer.key());
+        group.members.push(ctx.accounts.signer.key());
 
-        // TODO: Implement CPI to Light System Program to update compressed invite status
+        // Update compressed invite status to Accepted
+        let mut invite = LightAccount::<CompressedGroupInvite>::new_mut(
+            &crate::ID,
+            &account_meta,
+            current_invite,
+        )?;
+        invite.status = 1; // Accepted
+
+        // Set up CPI accounts
+        let light_cpi_accounts = CpiAccounts::new(
+            ctx.accounts.signer.as_ref(),
+            ctx.remaining_accounts,
+            crate::LIGHT_CPI_SIGNER,
+        );
+
+        // Invoke Light System Program via CPI
+        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+            .with_light_account(invite)?
+            .invoke(light_cpi_accounts)?;
 
         msg!("Group invite accepted (compressed): group={:?}, member={:?}",
-             group.group_id, ctx.accounts.payer.key());
+             group.group_id, ctx.accounts.signer.key());
 
         Ok(())
     }
@@ -852,30 +972,60 @@ pub mod mukon_messenger {
     /// Reject a compressed group invite
     pub fn reject_group_invite_compressed<'info>(
         ctx: Context<'_, '_, '_, 'info, RejectGroupInviteCompressed<'info>>,
-        _proof: Vec<u8>,
-        _compressed_account_hash: [u8; 32],
-        compressed_invite_data: Vec<u8>,  // Serialized CompressedGroupInvite
+        proof: ValidityProof,
+        account_meta: CompressedAccountMeta,
+        group_id: [u8; 32],
+        inviter: Pubkey,
+        invitee: Pubkey,
+        status: u8,
+        created_at: i64,
     ) -> Result<()> {
-        // Deserialize invite data
-        let invite: CompressedGroupInvite = AnchorDeserialize::deserialize(&mut compressed_invite_data.as_slice())
-            .map_err(|_| ErrorCode::NotInvited)?;
+        // Reconstruct current invite state
+        let current_invite = CompressedGroupInvite {
+            group_id,
+            inviter,
+            invitee,
+            status,
+            created_at,
+        };
 
         // Verify invite status is Pending
         require!(
-            invite.status == 0,
+            current_invite.status == 0,
             ErrorCode::NotInvited
         );
 
         // Verify invitee is the signer
         require!(
-            invite.invitee == ctx.accounts.payer.key(),
+            current_invite.invitee == ctx.accounts.signer.key(),
             ErrorCode::NotInvited
         );
 
-        // TODO: Implement CPI to Light System Program to update compressed invite status to Rejected
+        // Save group_id for logging before moving current_invite
+        let log_group_id = current_invite.group_id;
+
+        // Update compressed invite status to Rejected
+        let mut invite = LightAccount::<CompressedGroupInvite>::new_mut(
+            &crate::ID,
+            &account_meta,
+            current_invite,
+        )?;
+        invite.status = 2; // Rejected
+
+        // Set up CPI accounts
+        let light_cpi_accounts = CpiAccounts::new(
+            ctx.accounts.signer.as_ref(),
+            ctx.remaining_accounts,
+            crate::LIGHT_CPI_SIGNER,
+        );
+
+        // Invoke Light System Program via CPI
+        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+            .with_light_account(invite)?
+            .invoke(light_cpi_accounts)?;
 
         msg!("Group invite rejected (compressed): group={:?}, invitee={:?}",
-             invite.group_id, ctx.accounts.payer.key());
+             log_group_id, ctx.accounts.signer.key());
 
         Ok(())
     }
@@ -1152,12 +1302,16 @@ pub struct GroupKeyShare {
 /// Compressed version of GroupKeyShare for ZK compression
 /// Using fixed-size encrypted_key [u8; 48] instead of Vec<u8>
 /// NaCl box output for 32-byte key is always 48 bytes
-/// NOTE: LightHasher removed temporarily - needs proper trait implementations
-#[derive(Clone, Debug, LightDiscriminator, AnchorSerialize, AnchorDeserialize)]
+#[event]
+#[derive(Clone, Debug, LightDiscriminator, LightHasher)]
 pub struct CompressedGroupKeyShare {
+    #[hash]
     pub group_id: [u8; 32],
+    #[hash]
     pub member: Pubkey,
+    #[hash]
     pub encrypted_key: [u8; 48],  // Fixed-size: NaCl box output for 32-byte key
+    #[hash]
     pub nonce: [u8; 24],
 }
 // Total: 32 + 32 + 48 + 24 = 136 bytes + 8 discriminator = 144 bytes
@@ -1175,20 +1329,21 @@ impl Default for CompressedGroupKeyShare {
 
 /// Compressed version of GroupInvite for ZK compression
 /// Status is stored as u8 instead of enum for compressed format
-/// NOTE: LightHasher removed temporarily - needs proper trait implementations
-#[derive(Clone, Debug, Default, LightDiscriminator, AnchorSerialize, AnchorDeserialize)]
+#[event]
+#[derive(Clone, Debug, Default, LightDiscriminator, LightHasher)]
 pub struct CompressedGroupInvite {
+    #[hash]
     pub group_id: [u8; 32],
+    #[hash]
     pub inviter: Pubkey,
+    #[hash]
     pub invitee: Pubkey,
+    #[hash]
     pub status: u8,        // 0=Pending, 1=Accepted, 2=Rejected
+    #[hash]
     pub created_at: i64,
 }
 // Total: 32 + 32 + 32 + 1 + 8 = 105 bytes + 8 discriminator = 113 bytes
-
-// NOTE: CPI signer configuration commented out - not needed for current placeholder implementation
-// TODO: Uncomment and configure properly when implementing full CPI integration
-// light_sdk::derive_light_cpi_signer!();
 
 // ========== CONTEXT STRUCTURES ==========
 
@@ -1533,6 +1688,8 @@ pub struct CloseGroupKey<'info> {
 
 // ========== LIGHT PROTOCOL ZK COMPRESSION CONTEXT STRUCTURES ==========
 
+/// Context for storing compressed group key
+/// Note: Group account needed for membership validation
 #[derive(Accounts)]
 pub struct StoreCompressedGroupKey<'info> {
     #[account(
@@ -1541,22 +1698,20 @@ pub struct StoreCompressedGroupKey<'info> {
     )]
     pub group: Account<'info, Group>,
     #[account(mut)]
-    pub payer: Signer<'info>,
-    /// CHECK: Light system program
-    pub light_system_program: AccountInfo<'info>,
-    pub system_program: Program<'info, System>,
-    // remaining_accounts: Light system accounts + Merkle tree accounts
+    pub signer: Signer<'info>,
+    // remaining_accounts: Light system accounts + Merkle tree accounts provided by client
 }
 
+/// Minimal context for closing compressed group key
 #[derive(Accounts)]
 pub struct CloseCompressedGroupKey<'info> {
     #[account(mut)]
-    pub payer: Signer<'info>,
-    /// CHECK: Light system program
-    pub light_system_program: AccountInfo<'info>,
+    pub signer: Signer<'info>,
     // remaining_accounts: Light system accounts + Merkle tree accounts
 }
 
+/// Context for compressed group invites
+/// Note: Group account needed for validation and invitee reference
 #[derive(Accounts)]
 pub struct InviteToGroupCompressed<'info> {
     #[account(
@@ -1568,13 +1723,13 @@ pub struct InviteToGroupCompressed<'info> {
     /// CHECK: invitee is a public key
     pub invitee: AccountInfo<'info>,
     #[account(mut)]
-    pub payer: Signer<'info>,
-    /// CHECK: Light system program
-    pub light_system_program: AccountInfo<'info>,
+    pub signer: Signer<'info>,
     pub system_program: Program<'info, System>,
     // remaining_accounts: Light system accounts + Merkle tree accounts
 }
 
+/// Context for accepting compressed group invite
+/// Note: Group account modified to add member
 #[derive(Accounts)]
 pub struct AcceptGroupInviteCompressed<'info> {
     #[account(
@@ -1582,26 +1737,23 @@ pub struct AcceptGroupInviteCompressed<'info> {
         seeds = [b"group", group.group_id.as_ref(), GROUP_VERSION.as_ref()],
         bump,
         realloc = 8 + 32 + 32 + (4 + 64) + 8 + (4 + (group.members.len() + 1) * 32) + 32 + (1 + 32 + 8),
-        realloc::payer = payer,
+        realloc::payer = signer,
         realloc::zero = false
     )]
     pub group: Account<'info, Group>,
     pub user_token_account: Option<Account<'info, TokenAccount>>,
     #[account(mut)]
-    pub payer: Signer<'info>,
-    /// CHECK: Light system program
-    pub light_system_program: AccountInfo<'info>,
+    pub signer: Signer<'info>,
     pub system_program: Program<'info, System>,
     pub token_program: Option<Program<'info, Token>>,
     // remaining_accounts: Light system accounts + Merkle tree accounts
 }
 
+/// Minimal context for rejecting compressed group invite
 #[derive(Accounts)]
 pub struct RejectGroupInviteCompressed<'info> {
     #[account(mut)]
-    pub payer: Signer<'info>,
-    /// CHECK: Light system program
-    pub light_system_program: AccountInfo<'info>,
+    pub signer: Signer<'info>,
     // remaining_accounts: Light system accounts + Merkle tree accounts
 }
 
