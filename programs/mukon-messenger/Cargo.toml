@@ -14,7 +14,7 @@ cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
-idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build", "light-sdk/idl-build"]
 anchor-debug = []
 custom-heap = []
 custom-panic = []
@@ -24,7 +24,7 @@ custom-panic = []
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 anchor-spl = "0.32.1"
 sha2 = "0.10"
-light-sdk = { version = "0.19.0", features = ["anchor", "idl-build"] }
+light-sdk = { version = "0.17", features = ["anchor", "v2"] }
 light-hasher = "5.0.0"
 # ARCIUM TEMPORARILY DISABLED - Re-enable after core demo
 # arcium-anchor = "=0.6.2"

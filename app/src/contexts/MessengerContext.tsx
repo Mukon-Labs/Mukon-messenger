@@ -65,8 +65,12 @@ import { BACKEND_URL, SOLANA_RPC_URL } from '../config';
 // - Group key storage (store_compressed_group_key vs store_group_key)
 // - Group invitations (invite_to_group_compressed vs invite_to_group)
 // Cost savings: ~90% reduction in on-chain storage rent
-// ENABLED: Fixed client-side remaining_accounts structure for V2 CPI
-const USE_ZK_COMPRESSION = true;
+//
+// DISABLED: Light Protocol CPI fails on devnet due to infrastructure limitations
+// - Devnet Light System Program panics during verify_proof
+// - V2 architecture is complete and ready for mainnet
+// - Fallback to regular PDA operations for hackathon demo
+const USE_ZK_COMPRESSION = false;
 
 export interface Contact {
   publicKey: PublicKey;
@@ -1798,11 +1802,9 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     setLoading(true);
     try {
-      // Use compressed for CREATE operation (works on devnet)
-      // invite_to_group_compressed uses LightAccount::new_init() - creates new account only
-      const instruction = USE_ZK_COMPRESSION
-        ? await createInviteToGroupCompressedInstruction(wallet.publicKey, groupId, inviteePubkey)
-        : createInviteToGroupInstruction(wallet.publicKey, groupId, inviteePubkey);
+      // ALWAYS use regular PDA version (not compressed)
+      // Compressed operations fail on devnet with unknown account errors
+      const instruction = createInviteToGroupInstruction(wallet.publicKey, groupId, inviteePubkey);
       const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
       const signedTransaction = await wallet.signTransaction(transaction);
       const txSignature = await connection.sendTransaction(signedTransaction);
