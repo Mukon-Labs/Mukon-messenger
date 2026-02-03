@@ -7,6 +7,16 @@ import {
   VersionedTransaction,
 } from '@solana/web3.js';
 import { Buffer } from 'buffer';
+import {
+  deriveAddress as lightDeriveAddress,
+  deriveAddressSeed,
+  createBN254,
+  getDefaultAddressTreeInfo,
+  type BN254,
+  type HashWithTree,
+  type AddressWithTree,
+  type ValidityProofWithContext
+} from '@lightprotocol/stateless.js';
 
 const PROGRAM_ID = new PublicKey('GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj');
 
@@ -889,8 +899,7 @@ export function deserializeGroupKeyShare(data: Buffer): GroupKeyShare {
 
 // Import Light Protocol SDK
 // Note: lightRpc is already configured in config.ts
-// TODO: Re-enable after fixing Light Protocol bundling
-// import { lightRpc } from '../config';
+import { lightRpc } from '../config';
 
 /**
  * Helper: Derive compressed address using Light Protocol
@@ -900,22 +909,19 @@ async function deriveCompressedAddress(
   seeds: (Buffer | Uint8Array)[],
   programId: PublicKey
 ): Promise<{ address: PublicKey; addressTree: PublicKey; addressQueue: PublicKey }> {
-  // Get address tree info from Light RPC
-  // For beta SDK, we'll use a default address tree
-  // In production, query available trees: await lightRpc.getAddressTreeInfo()
+  // Get default address tree info from Light Protocol
+  const addressTreeInfo = await getDefaultAddressTreeInfo(lightRpc);
+  const addressTree = addressTreeInfo.tree;
+  const addressQueue = addressTreeInfo.queue;
 
-  // TODO: Replace with actual tree lookup once SDK stabilizes
-  // For now, using placeholders that match the Rust program's expectations
-  const addressTree = new PublicKey('11111111111111111111111111111111'); // Placeholder
-  const addressQueue = new PublicKey('11111111111111111111111111111111'); // Placeholder
+  // Convert seeds to Uint8Array format expected by SDK
+  const seedsArray = seeds.map(s => new Uint8Array(s));
 
-  // Derive address (similar to PDA but includes tree)
-  // Seeds hash combined with tree pubkey
-  const seedBuffer = Buffer.concat(seeds.map(s => Buffer.from(s)));
-  const [address] = PublicKey.findProgramAddressSync(
-    [seedBuffer, addressTree.toBuffer()],
-    programId
-  );
+  // Derive address seed (combines all seeds)
+  const addressSeed = deriveAddressSeed(seedsArray, programId);
+
+  // Derive the compressed address
+  const address = lightDeriveAddress(addressSeed, addressTree, programId);
 
   return { address, addressTree, addressQueue };
 }
@@ -969,26 +975,34 @@ function packLightSystemAccounts(
 /**
  * Helper: Serialize ValidityProof for instruction data
  */
-function serializeValidityProof(proof: any): Buffer {
-  // ValidityProof structure (from Light Protocol):
-  // - proof: CompressedProof (256 bytes)
-  // - merkle_tree_root_index: u16
-  // - leaf_index: u32
-  // - nullifier_queue_index: u16
+function serializeValidityProof(proofWithContext: ValidityProofWithContext): Buffer {
+  // ValidityProof structure:
+  // - a: [u8; 32]
+  // - b: [u8; 64]
+  // - c: [u8; 32]
+  // Total: 128 bytes
 
-  // For beta SDK, we'll use a simplified serialization
-  // TODO: Update when SDK provides proper serialization utilities
+  const proof = proofWithContext.compressedProof;
+  if (!proof) {
+    // If no proof available (shouldn't happen), use zeros
+    return Buffer.alloc(128);
+  }
 
-  // Placeholder proof (256 bytes of zeros for now)
-  const proofBytes = Buffer.alloc(256);
+  // Convert proof components to buffers
+  const aBytes = Buffer.from(proof.a);
+  const bBytes = Buffer.from(proof.b);
+  const cBytes = Buffer.from(proof.c);
 
-  // Indices (u16, u32, u16)
-  const indices = Buffer.alloc(8);
-  indices.writeUInt16LE(0, 0); // merkle_tree_root_index
-  indices.writeUInt32LE(0, 2); // leaf_index
-  indices.writeUInt16LE(0, 6); // nullifier_queue_index
+  // Ensure correct sizes (pad or truncate if necessary)
+  const a = Buffer.alloc(32);
+  const b = Buffer.alloc(64);
+  const c = Buffer.alloc(32);
 
-  return Buffer.concat([proofBytes, indices]);
+  aBytes.copy(a, 0, 0, Math.min(32, aBytes.length));
+  bBytes.copy(b, 0, 0, Math.min(64, bBytes.length));
+  cBytes.copy(c, 0, 0, Math.min(32, cBytes.length));
+
+  return Buffer.concat([a, b, c]);
 }
 
 /**
@@ -1063,11 +1077,19 @@ export async function createStoreCompressedGroupKeyInstruction(
 
   // Get validity proof from Light RPC
   // This proves the address doesn't exist yet (for CREATE operation)
-  let validityProof;
+  let validityProof: ValidityProofWithContext;
   try {
-    // TODO: Use actual Light RPC when SDK is stable
-    // validityProof = await lightRpc.getValidityProof([], [{ address, tree: addressTree }]);
-    validityProof = {}; // Placeholder
+    // Convert address to BN254 for SDK
+    const addressBN = createBN254(address.toBytes());
+
+    // For CREATE: empty hashes (no existing accounts), new address to prove non-existence
+    const newAddresses: AddressWithTree[] = [{
+      address: addressBN,
+      tree: addressTree,
+      queue: addressQueue,
+    }];
+
+    validityProof = await lightRpc.getValidityProofV0([], newAddresses);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
     throw new Error('Failed to fetch validity proof from Light RPC');
@@ -1140,20 +1162,28 @@ export async function createCloseCompressedGroupKeyInstruction(
   // Fetch compressed account to get state tree info
   let compressedAccount;
   try {
-    // TODO: Use actual Light RPC when SDK is stable
-    // compressedAccount = await lightRpc.getCompressedAccount(address);
-    compressedAccount = { tree: addressTree, queue: addressQueue }; // Placeholder
+    const addressBN = createBN254(address.toBytes());
+    compressedAccount = await lightRpc.getCompressedAccount(addressBN);
+
+    if (!compressedAccount) {
+      throw new Error('Compressed account not found');
+    }
   } catch (error) {
     console.error('Failed to fetch compressed account:', error);
     throw new Error('Failed to fetch compressed account from Light RPC');
   }
 
   // Get validity proof (proves account EXISTS for CLOSE operation)
-  let validityProof;
+  let validityProof: ValidityProofWithContext;
   try {
-    // TODO: Use actual Light RPC when SDK is stable
-    // validityProof = await lightRpc.getValidityProof([compressedAccount.hash], []);
-    validityProof = {}; // Placeholder
+    // For CLOSE: prove existing account exists (pass its hash)
+    const hashes: HashWithTree[] = [{
+      hash: compressedAccount.hash,
+      tree: compressedAccount.treeInfo.tree,
+      queue: compressedAccount.treeInfo.queue,
+    }];
+
+    validityProof = await lightRpc.getValidityProofV0(hashes, []);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
     throw new Error('Failed to fetch validity proof from Light RPC');
@@ -1161,8 +1191,8 @@ export async function createCloseCompressedGroupKeyInstruction(
 
   // Pack Light System accounts + Merkle trees
   const remainingAccounts = packLightSystemAccounts(
-    compressedAccount.tree,
-    compressedAccount.queue
+    compressedAccount.treeInfo.tree,
+    compressedAccount.treeInfo.queue
   );
   const stateTreeIndex = 6; // After 6 Light System accounts
   const stateQueueIndex = 7;
@@ -1212,11 +1242,18 @@ export async function createInviteToGroupCompressedInstruction(
   );
 
   // Get validity proof (proves invite doesn't exist yet)
-  let validityProof;
+  let validityProof: ValidityProofWithContext;
   try {
-    // TODO: Use actual Light RPC when SDK is stable
-    // validityProof = await lightRpc.getValidityProof([], [{ address, tree: addressTree }]);
-    validityProof = {}; // Placeholder
+    const addressBN = createBN254(address.toBytes());
+
+    // For CREATE: prove new address doesn't exist
+    const newAddresses: AddressWithTree[] = [{
+      address: addressBN,
+      tree: addressTree,
+      queue: addressQueue,
+    }];
+
+    validityProof = await lightRpc.getValidityProofV0([], newAddresses);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
     throw new Error('Failed to fetch validity proof from Light RPC');
@@ -1283,20 +1320,28 @@ export async function createAcceptGroupInviteCompressedInstruction(
   // Fetch compressed invite account
   let compressedAccount;
   try {
-    // TODO: Use actual Light RPC when SDK is stable
-    // compressedAccount = await lightRpc.getCompressedAccount(address);
-    compressedAccount = { tree: addressTree, queue: addressQueue }; // Placeholder
+    const addressBN = createBN254(address.toBytes());
+    compressedAccount = await lightRpc.getCompressedAccount(addressBN);
+
+    if (!compressedAccount) {
+      throw new Error('Compressed invite not found');
+    }
   } catch (error) {
     console.error('Failed to fetch compressed account:', error);
     throw new Error('Failed to fetch compressed invite from Light RPC');
   }
 
   // Get validity proof (proves invite exists for UPDATE operation)
-  let validityProof;
+  let validityProof: ValidityProofWithContext;
   try {
-    // TODO: Use actual Light RPC when SDK is stable
-    // validityProof = await lightRpc.getValidityProof([compressedAccount.hash], []);
-    validityProof = {}; // Placeholder
+    // For UPDATE: prove existing account exists
+    const hashes: HashWithTree[] = [{
+      hash: compressedAccount.hash,
+      tree: compressedAccount.treeInfo.tree,
+      queue: compressedAccount.treeInfo.queue,
+    }];
+
+    validityProof = await lightRpc.getValidityProofV0(hashes, []);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
     throw new Error('Failed to fetch validity proof from Light RPC');
@@ -1304,8 +1349,8 @@ export async function createAcceptGroupInviteCompressedInstruction(
 
   // Pack Light System accounts + Merkle trees
   const remainingAccounts = packLightSystemAccounts(
-    compressedAccount.tree,
-    compressedAccount.queue
+    compressedAccount.treeInfo.tree,
+    compressedAccount.treeInfo.queue
   );
   const stateTreeIndex = 6;
   const stateQueueIndex = 7;
@@ -1372,20 +1417,28 @@ export async function createRejectGroupInviteCompressedInstruction(
   // Fetch compressed invite account
   let compressedAccount;
   try {
-    // TODO: Use actual Light RPC when SDK is stable
-    // compressedAccount = await lightRpc.getCompressedAccount(address);
-    compressedAccount = { tree: addressTree, queue: addressQueue }; // Placeholder
+    const addressBN = createBN254(address.toBytes());
+    compressedAccount = await lightRpc.getCompressedAccount(addressBN);
+
+    if (!compressedAccount) {
+      throw new Error('Compressed invite not found');
+    }
   } catch (error) {
     console.error('Failed to fetch compressed account:', error);
     throw new Error('Failed to fetch compressed invite from Light RPC');
   }
 
   // Get validity proof (proves invite exists for UPDATE operation)
-  let validityProof;
+  let validityProof: ValidityProofWithContext;
   try {
-    // TODO: Use actual Light RPC when SDK is stable
-    // validityProof = await lightRpc.getValidityProof([compressedAccount.hash], []);
-    validityProof = {}; // Placeholder
+    // For UPDATE: prove existing account exists
+    const hashes: HashWithTree[] = [{
+      hash: compressedAccount.hash,
+      tree: compressedAccount.treeInfo.tree,
+      queue: compressedAccount.treeInfo.queue,
+    }];
+
+    validityProof = await lightRpc.getValidityProofV0(hashes, []);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
     throw new Error('Failed to fetch validity proof from Light RPC');
@@ -1393,8 +1446,8 @@ export async function createRejectGroupInviteCompressedInstruction(
 
   // Pack Light System accounts + Merkle trees
   const remainingAccounts = packLightSystemAccounts(
-    compressedAccount.tree,
-    compressedAccount.queue
+    compressedAccount.treeInfo.tree,
+    compressedAccount.treeInfo.queue
   );
   const stateTreeIndex = 6;
   const stateQueueIndex = 7;

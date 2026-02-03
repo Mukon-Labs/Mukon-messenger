@@ -21,7 +21,7 @@
     "@arcium-hq/client": "^0.6.3",
     "@coral-xyz/anchor": "^0.32.1",
     "@craftzdog/react-native-buffer": "^6.1.1",
-    "@lightprotocol/stateless.js": "beta",
+    "@lightprotocol/stateless.js": "^0.23.0-beta.5",
     "@react-native-async-storage/async-storage": "1.23.1",
     "@react-navigation/drawer": "^6.7.2",
     "@react-navigation/native": "^6.1.9",
