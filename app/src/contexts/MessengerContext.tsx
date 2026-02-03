@@ -1684,6 +1684,15 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       const backupKey = `groupKeyBackedUp_${wallet.publicKey.toBase58()}_${groupIdHex}`;
       await AsyncStorage.setItem(backupKey, 'true');
 
+      // Store encrypted key + nonce for later compressed account closure
+      if (USE_ZK_COMPRESSION) {
+        const keyDataKey = `groupKeyData_${wallet.publicKey.toBase58()}_${groupIdHex}`;
+        await AsyncStorage.setItem(keyDataKey, JSON.stringify({
+          encryptedKey: Array.from(adminEncryptedKey),
+          nonce: Array.from(adminNonce)
+        }));
+      }
+
       // Share group key with all invitees via Socket.IO
       if (socket && encryptionKeys) {
         for (const inviteePubkey of invitees) {
@@ -1855,11 +1864,34 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     setLoading(true);
     try {
-      const instruction = createAcceptGroupInviteInstruction(
-        wallet.publicKey,
-        groupId,
-        userTokenAccount || null
-      );
+      let instruction;
+
+      if (USE_ZK_COMPRESSION) {
+        // Find the invite to get required parameters for compressed instruction
+        const groupIdHex = Buffer.from(groupId).toString('hex');
+        const invite = groupInvites.find(inv =>
+          Buffer.from(inv.groupId).toString('hex') === groupIdHex
+        );
+
+        if (!invite) {
+          throw new Error('Invite not found in local state');
+        }
+
+        instruction = await createAcceptGroupInviteCompressedInstruction(
+          wallet.publicKey,
+          groupId,
+          invite.inviter,
+          invite.status === 'Pending' ? 0 : invite.status === 'Accepted' ? 1 : 2,
+          BigInt(invite.createdAt.getTime()),
+          userTokenAccount || null
+        );
+      } else {
+        instruction = createAcceptGroupInviteInstruction(
+          wallet.publicKey,
+          groupId,
+          userTokenAccount || null
+        );
+      }
 
       const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
       const signedTransaction = await wallet.signTransaction(transaction);
@@ -1896,7 +1928,30 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     setLoading(true);
     try {
-      const instruction = createRejectGroupInviteInstruction(wallet.publicKey, groupId);
+      let instruction;
+
+      if (USE_ZK_COMPRESSION) {
+        // Find the invite to get required parameters for compressed instruction
+        const groupIdHex = Buffer.from(groupId).toString('hex');
+        const invite = groupInvites.find(inv =>
+          Buffer.from(inv.groupId).toString('hex') === groupIdHex
+        );
+
+        if (!invite) {
+          throw new Error('Invite not found in local state');
+        }
+
+        instruction = await createRejectGroupInviteCompressedInstruction(
+          wallet.publicKey,
+          groupId,
+          invite.inviter,
+          invite.status === 'Pending' ? 0 : invite.status === 'Accepted' ? 1 : 2,
+          BigInt(invite.createdAt.getTime())
+        );
+      } else {
+        instruction = createRejectGroupInviteInstruction(wallet.publicKey, groupId);
+      }
+
       const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
       const signedTransaction = await wallet.signTransaction(transaction);
       const txSignature = await connection.sendTransaction(signedTransaction);
@@ -1918,11 +1973,36 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     setLoading(true);
     try {
       // Build instructions: leave group + close key share (to recover rent)
-      // TODO: Support closing compressed key shares (requires fetching encrypted key + nonce first)
-      const instructions = [
-        createLeaveGroupInstruction(wallet.publicKey, groupId),
-        createCloseGroupKeyInstruction(wallet.publicKey, groupId),
-      ];
+      const instructions = [createLeaveGroupInstruction(wallet.publicKey, groupId)];
+
+      // Add close key instruction (compressed or regular)
+      if (USE_ZK_COMPRESSION) {
+        const groupIdHex = Buffer.from(groupId).toString('hex');
+        const keyDataKey = `groupKeyData_${wallet.publicKey.toBase58()}_${groupIdHex}`;
+        const keyDataStr = await AsyncStorage.getItem(keyDataKey);
+
+        if (keyDataStr) {
+          const keyData = JSON.parse(keyDataStr);
+          const encryptedKey = new Uint8Array(keyData.encryptedKey);
+          const nonce = new Uint8Array(keyData.nonce);
+
+          instructions.push(
+            await createCloseCompressedGroupKeyInstruction(
+              wallet.publicKey,
+              groupId,
+              encryptedKey,
+              nonce
+            )
+          );
+
+          // Clean up stored key data
+          await AsyncStorage.removeItem(keyDataKey);
+        } else {
+          console.warn('No stored key data for compressed close, skipping key closure');
+        }
+      } else {
+        instructions.push(createCloseGroupKeyInstruction(wallet.publicKey, groupId));
+      }
 
       const transaction = await buildTransaction(connection, wallet.publicKey, instructions);
       const signedTransaction = await wallet.signTransaction(transaction);
