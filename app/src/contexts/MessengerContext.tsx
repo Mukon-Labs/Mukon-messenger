@@ -65,6 +65,7 @@ import { BACKEND_URL, SOLANA_RPC_URL } from '../config';
 // - Group key storage (store_compressed_group_key vs store_group_key)
 // - Group invitations (invite_to_group_compressed vs invite_to_group)
 // Cost savings: ~90% reduction in on-chain storage rent
+// ENABLED: Fixed client-side remaining_accounts structure for V2 CPI
 const USE_ZK_COMPRESSION = true;
 
 export interface Contact {
@@ -1643,6 +1644,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         )
       );
 
+      // Use compressed for CREATE operation (works on devnet)
+      // store_compressed_group_key uses LightAccount::new_init() - creates new account only
       const storeKeyInstruction = USE_ZK_COMPRESSION
         ? await createStoreCompressedGroupKeyInstruction(
             wallet.publicKey,
@@ -1795,6 +1798,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     setLoading(true);
     try {
+      // Use compressed for CREATE operation (works on devnet)
+      // invite_to_group_compressed uses LightAccount::new_init() - creates new account only
       const instruction = USE_ZK_COMPRESSION
         ? await createInviteToGroupCompressedInstruction(wallet.publicKey, groupId, inviteePubkey)
         : createInviteToGroupInstruction(wallet.publicKey, groupId, inviteePubkey);
@@ -1864,34 +1869,15 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     setLoading(true);
     try {
-      let instruction;
-
-      if (USE_ZK_COMPRESSION) {
-        // Find the invite to get required parameters for compressed instruction
-        const groupIdHex = Buffer.from(groupId).toString('hex');
-        const invite = groupInvites.find(inv =>
-          Buffer.from(inv.groupId).toString('hex') === groupIdHex
-        );
-
-        if (!invite) {
-          throw new Error('Invite not found in local state');
-        }
-
-        instruction = await createAcceptGroupInviteCompressedInstruction(
-          wallet.publicKey,
-          groupId,
-          invite.inviter,
-          invite.status === 'Pending' ? 0 : invite.status === 'Accepted' ? 1 : 2,
-          BigInt(invite.createdAt.getTime()),
-          userTokenAccount || null
-        );
-      } else {
-        instruction = createAcceptGroupInviteInstruction(
-          wallet.publicKey,
-          groupId,
-          userTokenAccount || null
-        );
-      }
+      // ALWAYS use regular PDA version (not compressed)
+      // Compressed MUTATION operations fail on devnet indexer
+      // The compressed accept_group_invite_compressed uses LightAccount::new_mut()
+      // which nullifies old account and creates new one - indexer can't track this
+      const instruction = createAcceptGroupInviteInstruction(
+        wallet.publicKey,
+        groupId,
+        userTokenAccount || null
+      );
 
       const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
       const signedTransaction = await wallet.signTransaction(transaction);
@@ -1928,29 +1914,11 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     setLoading(true);
     try {
-      let instruction;
-
-      if (USE_ZK_COMPRESSION) {
-        // Find the invite to get required parameters for compressed instruction
-        const groupIdHex = Buffer.from(groupId).toString('hex');
-        const invite = groupInvites.find(inv =>
-          Buffer.from(inv.groupId).toString('hex') === groupIdHex
-        );
-
-        if (!invite) {
-          throw new Error('Invite not found in local state');
-        }
-
-        instruction = await createRejectGroupInviteCompressedInstruction(
-          wallet.publicKey,
-          groupId,
-          invite.inviter,
-          invite.status === 'Pending' ? 0 : invite.status === 'Accepted' ? 1 : 2,
-          BigInt(invite.createdAt.getTime())
-        );
-      } else {
-        instruction = createRejectGroupInviteInstruction(wallet.publicKey, groupId);
-      }
+      // ALWAYS use regular PDA version (not compressed)
+      // Compressed MUTATION operations fail on devnet indexer
+      // The compressed reject_group_invite_compressed uses LightAccount::new_mut()
+      // which nullifies old account and creates new one - indexer can't track this
+      const instruction = createRejectGroupInviteInstruction(wallet.publicKey, groupId);
 
       const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
       const signedTransaction = await wallet.signTransaction(transaction);
@@ -1975,7 +1943,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       // Build instructions: leave group + close key share (to recover rent)
       const instructions = [createLeaveGroupInstruction(wallet.publicKey, groupId)];
 
-      // Add close key instruction (compressed or regular)
+      // Use compressed for CLOSE operation (works on devnet)
+      // close_compressed_group_key uses LightAccount::new_close() - nullifies account only
       if (USE_ZK_COMPRESSION) {
         const groupIdHex = Buffer.from(groupId).toString('hex');
         const keyDataKey = `groupKeyData_${wallet.publicKey.toBase58()}_${groupIdHex}`;

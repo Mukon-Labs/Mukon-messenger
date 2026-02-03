@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 // Light Protocol ZK Compression imports
 use light_sdk::{
     account::LightAccount,
-    address::v2::derive_address,
-    cpi::{v2::CpiAccounts, CpiSigner, InvokeLightSystemProgram, LightCpiInstruction},
+    address::v1::derive_address,
+    cpi::{v1::CpiAccounts, CpiSigner, InvokeLightSystemProgram, LightCpiInstruction},
     instruction::{
         account_meta::CompressedAccountMeta,
         PackedAddressTreeInfo,
@@ -742,7 +742,7 @@ pub mod mukon_messenger {
         );
 
         let new_address_params =
-            address_tree_info.into_new_address_params_assigned_packed(address_seed, Some(0));
+            address_tree_info.into_new_address_params_packed(address_seed);
 
         // Create new compressed account
         let mut key_share = LightAccount::<CompressedGroupKeyShare>::new_init(
@@ -757,7 +757,7 @@ pub mod mukon_messenger {
         key_share.nonce = nonce;
 
         // Invoke Light System Program via CPI
-        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+        light_sdk::cpi::v1::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
             .with_light_account(key_share)?
             .with_new_addresses(&[new_address_params])
             .invoke(light_cpi_accounts)?;
@@ -805,7 +805,7 @@ pub mod mukon_messenger {
         );
 
         // Invoke Light System Program via CPI
-        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+        light_sdk::cpi::v1::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
             .with_light_account(key_share)?
             .invoke(light_cpi_accounts)?;
 
@@ -858,7 +858,7 @@ pub mod mukon_messenger {
         );
 
         let new_address_params =
-            address_tree_info.into_new_address_params_assigned_packed(address_seed, Some(0));
+            address_tree_info.into_new_address_params_packed(address_seed);
 
         // Create new compressed invite
         let mut invite = LightAccount::<CompressedGroupInvite>::new_init(
@@ -874,7 +874,7 @@ pub mod mukon_messenger {
         invite.created_at = Clock::get()?.unix_timestamp;
 
         // Invoke Light System Program via CPI
-        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+        light_sdk::cpi::v1::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
             .with_light_account(invite)?
             .with_new_addresses(&[new_address_params])
             .invoke(light_cpi_accounts)?;
@@ -959,7 +959,7 @@ pub mod mukon_messenger {
         );
 
         // Invoke Light System Program via CPI
-        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+        light_sdk::cpi::v1::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
             .with_light_account(invite)?
             .invoke(light_cpi_accounts)?;
 
@@ -1020,7 +1020,7 @@ pub mod mukon_messenger {
         );
 
         // Invoke Light System Program via CPI
-        light_sdk::cpi::v2::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
+        light_sdk::cpi::v1::LightSystemProgramCpi::new_cpi(crate::LIGHT_CPI_SIGNER, proof)
             .with_light_account(invite)?
             .invoke(light_cpi_accounts)?;
 

@@ -900,6 +900,13 @@ export function deserializeGroupKeyShare(data: Buffer): GroupKeyShare {
 // Import Light Protocol SDK
 // Note: lightRpc is already configured in config.ts
 import { lightRpc } from '../config';
+import {
+  getRegisteredProgramPda,
+  getAccountCompressionAuthority,
+  lightSystemProgram,
+  accountCompressionProgram,
+  noopProgram,
+} from '@lightprotocol/stateless.js';
 
 /**
  * Helper: Derive compressed address using Light Protocol
@@ -928,7 +935,15 @@ async function deriveCompressedAddress(
 
 /**
  * Helper: Pack Light System accounts into remaining_accounts
- * Matches Light SDK's expected account layout
+ * Uses V1 account layout (stable, works on devnet)
+ *
+ * V1 Account Order (5 system accounts):
+ * 0. Light System Program
+ * 1. Registered Program PDA
+ * 2. Noop Program
+ * 3. Account Compression Program
+ * 4. Account Compression Authority
+ * 5+. Tree accounts (address/state trees and queues)
  */
 function packLightSystemAccounts(
   addressTree?: PublicKey,
@@ -938,24 +953,22 @@ function packLightSystemAccounts(
 ): { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[] {
   const accounts: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[] = [];
 
-  // Light System Program accounts (6 required accounts)
-  const LIGHT_SYSTEM_PROGRAM = new PublicKey('H5sFv8VwWmjxHYS2GB4fTDsK7uTtnRT4WiixtHrET3bN');
-  const LIGHT_VERIFIER_PROGRAM = new PublicKey('BppwxXiYnRjEfV5fW7N4T5iQVQfqCG4z9fYh7qbZjg9Z');
-  const NOOP_PROGRAM = new PublicKey('noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmV');
-  const ACCOUNT_COMPRESSION_PROGRAM = new PublicKey('CbjvJc1SNx1aav8tU49dJGHu8EUdzQJSMtkjDmV8miqK');
-  const ACCOUNT_COMPRESSION_AUTHORITY = new PublicKey('H5sFv8VwWmjxHYS2GB4fTDsK7uTtnRT4WiixtHrET3bN');
-  const REGISTERED_PROGRAM_PDA = new PublicKey('H5sFv8VwWmjxHYS2GB4fTDsK7uTtnRT4WiixtHrET3bN');
+  // V1 system accounts
+  const LIGHT_SYSTEM_PROGRAM = new PublicKey(lightSystemProgram);
+  const REGISTERED_PROGRAM_PDA = getRegisteredProgramPda();
+  const NOOP_PROGRAM = new PublicKey(noopProgram);
+  const ACCOUNT_COMPRESSION_PROGRAM = new PublicKey(accountCompressionProgram);
+  const ACCOUNT_COMPRESSION_AUTHORITY = getAccountCompressionAuthority();
 
   accounts.push(
-    { pubkey: LIGHT_SYSTEM_PROGRAM, isSigner: false, isWritable: false },
-    { pubkey: LIGHT_VERIFIER_PROGRAM, isSigner: false, isWritable: false },
-    { pubkey: NOOP_PROGRAM, isSigner: false, isWritable: false },
-    { pubkey: ACCOUNT_COMPRESSION_PROGRAM, isSigner: false, isWritable: false },
-    { pubkey: ACCOUNT_COMPRESSION_AUTHORITY, isSigner: false, isWritable: false },
-    { pubkey: REGISTERED_PROGRAM_PDA, isSigner: false, isWritable: false }
+    { pubkey: LIGHT_SYSTEM_PROGRAM, isSigner: false, isWritable: false },      // [0]
+    { pubkey: REGISTERED_PROGRAM_PDA, isSigner: false, isWritable: false },    // [1]
+    { pubkey: NOOP_PROGRAM, isSigner: false, isWritable: false },              // [2]
+    { pubkey: ACCOUNT_COMPRESSION_PROGRAM, isSigner: false, isWritable: false }, // [3]
+    { pubkey: ACCOUNT_COMPRESSION_AUTHORITY, isSigner: false, isWritable: false } // [4]
   );
 
-  // Add Merkle tree accounts if provided
+  // Add Merkle tree accounts starting at index 5
   if (addressTree) {
     accounts.push({ pubkey: addressTree, isSigner: false, isWritable: true });
   }
@@ -974,72 +987,79 @@ function packLightSystemAccounts(
 
 /**
  * Helper: Serialize ValidityProof for instruction data
+ * Rust type: Option<CompressedProof> wrapped in ValidityProof
+ * Borsh serializes Option<T> as 0x01 + T for Some, or 0x00 for None
  */
 function serializeValidityProof(proofWithContext: ValidityProofWithContext): Buffer {
-  // ValidityProof structure:
-  // - a: [u8; 32]
-  // - b: [u8; 64]
-  // - c: [u8; 32]
-  // Total: 128 bytes
-
   const proof = proofWithContext.compressedProof;
   if (!proof) {
-    // If no proof available (shouldn't happen), use zeros
-    return Buffer.alloc(128);
+    // None: single 0x00 byte
+    return Buffer.from([0x00]);
   }
 
-  // Convert proof components to buffers
-  const aBytes = Buffer.from(proof.a);
-  const bBytes = Buffer.from(proof.b);
-  const cBytes = Buffer.from(proof.c);
-
-  // Ensure correct sizes (pad or truncate if necessary)
+  // Some: 0x01 + proof bytes
   const a = Buffer.alloc(32);
   const b = Buffer.alloc(64);
   const c = Buffer.alloc(32);
 
-  aBytes.copy(a, 0, 0, Math.min(32, aBytes.length));
-  bBytes.copy(b, 0, 0, Math.min(64, bBytes.length));
-  cBytes.copy(c, 0, 0, Math.min(32, cBytes.length));
+  Buffer.from(proof.a).copy(a);
+  Buffer.from(proof.b).copy(b);
+  Buffer.from(proof.c).copy(c);
 
-  return Buffer.concat([a, b, c]);
+  return Buffer.concat([Buffer.from([0x01]), a, b, c]);
 }
 
 /**
  * Helper: Serialize PackedAddressTreeInfo for instruction data
+ * Rust struct:
+ *   address_merkle_tree_pubkey_index: u8 (1 byte)
+ *   address_queue_pubkey_index: u8       (1 byte)
+ *   root_index: u16                      (2 bytes, little-endian)
+ * Total: 4 bytes
  */
 function serializePackedAddressTreeInfo(
   addressMerkleTreePubkeyIndex: number,
-  addressQueuePubkeyIndex: number
+  addressQueuePubkeyIndex: number,
+  rootIndex: number
 ): Buffer {
-  // PackedAddressTreeInfo is just two u8 indices
-  const buffer = Buffer.alloc(2);
+  const buffer = Buffer.alloc(4);
   buffer.writeUInt8(addressMerkleTreePubkeyIndex, 0);
   buffer.writeUInt8(addressQueuePubkeyIndex, 1);
+  buffer.writeUInt16LE(rootIndex, 2);
   return buffer;
 }
 
 /**
  * Helper: Serialize CompressedAccountMeta for instruction data
+ * Rust struct:
+ *   tree_info: PackedStateTreeInfo {
+ *     root_index: u16              (2 bytes)
+ *     prove_by_index: bool         (1 byte)
+ *     merkle_tree_pubkey_index: u8 (1 byte)
+ *     queue_pubkey_index: u8       (1 byte)
+ *     leaf_index: u32              (4 bytes)
+ *   }
+ *   address: [u8; 32]              (32 bytes)
+ *   output_state_tree_index: u8    (1 byte)
+ * Total: 42 bytes
  */
 function serializeCompressedAccountMeta(
+  rootIndex: number,
+  proveByIndex: boolean,
   stateMerkleTreePubkeyIndex: number,
   stateQueuePubkeyIndex: number,
+  leafIndex: number,
   address: PublicKey,
   outputStateTreeIndex: number
 ): Buffer {
-  // CompressedAccountMeta structure:
-  // - state_merkle_tree_pubkey_index: u8
-  // - state_queue_pubkey_index: u8
-  // - address: [u8; 32]
-  // - output_state_tree_index: u8
-
-  const buffer = Buffer.alloc(35);
-  buffer.writeUInt8(stateMerkleTreePubkeyIndex, 0);
-  buffer.writeUInt8(stateQueuePubkeyIndex, 1);
-  address.toBuffer().copy(buffer, 2);
-  buffer.writeUInt8(outputStateTreeIndex, 34);
-
+  const buffer = Buffer.alloc(42);
+  buffer.writeUInt16LE(rootIndex, 0);
+  buffer.writeUInt8(proveByIndex ? 1 : 0, 2);
+  buffer.writeUInt8(stateMerkleTreePubkeyIndex, 3);
+  buffer.writeUInt8(stateQueuePubkeyIndex, 4);
+  buffer.writeUInt32LE(leafIndex, 5);
+  address.toBuffer().copy(buffer, 9);
+  buffer.writeUInt8(outputStateTreeIndex, 41);
   return buffer;
 }
 
@@ -1089,6 +1109,7 @@ export async function createStoreCompressedGroupKeyInstruction(
       queue: addressQueue,
     }];
 
+    // Use V0 proof API (V2 account structure is separate from proof version)
     validityProof = await lightRpc.getValidityProofV0([], newAddresses);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
@@ -1098,15 +1119,15 @@ export async function createStoreCompressedGroupKeyInstruction(
   // Pack Light System accounts + Merkle trees into remaining_accounts
   // These accounts are at specific indices referenced in the instruction data
   const remainingAccounts = packLightSystemAccounts(addressTree, addressQueue);
-  const addressTreeIndex = 6; // After 6 Light System accounts
-  const addressQueueIndex = 7;
+  const addressTreeIndex = 5; // After 5 Light System accounts (V1)
+  const addressQueueIndex = 6;
   const outputStateTreeIndex = 0; // Default state tree
 
   // Build instruction data
   const data = Buffer.concat([
     DISCRIMINATORS.store_compressed_group_key,
     serializeValidityProof(validityProof),
-    serializePackedAddressTreeInfo(addressTreeIndex, addressQueueIndex),
+    serializePackedAddressTreeInfo(addressTreeIndex, addressQueueIndex, validityProof.rootIndices[0]),
     Buffer.from([outputStateTreeIndex]),
     Buffer.from(groupId),
     Buffer.from(encryptedKey),
@@ -1183,6 +1204,7 @@ export async function createCloseCompressedGroupKeyInstruction(
       queue: compressedAccount.treeInfo.queue,
     }];
 
+    // Use V0 proof API (V2 account structure is separate from proof version)
     validityProof = await lightRpc.getValidityProofV0(hashes, []);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
@@ -1191,18 +1213,28 @@ export async function createCloseCompressedGroupKeyInstruction(
 
   // Pack Light System accounts + Merkle trees
   const remainingAccounts = packLightSystemAccounts(
+    undefined,
+    undefined,
     compressedAccount.treeInfo.tree,
     compressedAccount.treeInfo.queue
   );
-  const stateTreeIndex = 6; // After 6 Light System accounts
-  const stateQueueIndex = 7;
+  const stateTreeIndex = 5; // After 5 Light System accounts (V1)
+  const stateQueueIndex = 6;
   const outputStateTreeIndex = 0;
 
   // Build instruction data
   const data = Buffer.concat([
     DISCRIMINATORS.close_compressed_group_key,
     serializeValidityProof(validityProof),
-    serializeCompressedAccountMeta(stateTreeIndex, stateQueueIndex, address, outputStateTreeIndex),
+    serializeCompressedAccountMeta(
+      validityProof.rootIndices[0],
+      validityProof.proveByIndices[0],
+      stateTreeIndex,
+      stateQueueIndex,
+      validityProof.leafIndices[0],
+      address,
+      outputStateTreeIndex
+    ),
     Buffer.from(groupId),
     payer.toBuffer(),
     Buffer.from(encryptedKey),
@@ -1244,6 +1276,7 @@ export async function createInviteToGroupCompressedInstruction(
   // Get validity proof (proves invite doesn't exist yet)
   let validityProof: ValidityProofWithContext;
   try {
+    // Convert address to BN254 for SDK
     const addressBN = createBN254(address.toBytes());
 
     // For CREATE: prove new address doesn't exist
@@ -1253,6 +1286,7 @@ export async function createInviteToGroupCompressedInstruction(
       queue: addressQueue,
     }];
 
+    // Use V0 proof API (V2 account structure is separate from proof version)
     validityProof = await lightRpc.getValidityProofV0([], newAddresses);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
@@ -1261,15 +1295,15 @@ export async function createInviteToGroupCompressedInstruction(
 
   // Pack Light System accounts + Merkle trees
   const remainingAccounts = packLightSystemAccounts(addressTree, addressQueue);
-  const addressTreeIndex = 6;
-  const addressQueueIndex = 7;
+  const addressTreeIndex = 5; // After 5 Light System accounts (V1)
+  const addressQueueIndex = 6;
   const outputStateTreeIndex = 0;
 
   // Build instruction data
   const data = Buffer.concat([
     DISCRIMINATORS.invite_to_group_compressed,
     serializeValidityProof(validityProof),
-    serializePackedAddressTreeInfo(addressTreeIndex, addressQueueIndex),
+    serializePackedAddressTreeInfo(addressTreeIndex, addressQueueIndex, validityProof.rootIndices[0]),
     Buffer.from([outputStateTreeIndex]),
   ]);
 
@@ -1341,6 +1375,7 @@ export async function createAcceptGroupInviteCompressedInstruction(
       queue: compressedAccount.treeInfo.queue,
     }];
 
+    // Use V0 proof API (V2 account structure is separate from proof version)
     validityProof = await lightRpc.getValidityProofV0(hashes, []);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
@@ -1349,11 +1384,13 @@ export async function createAcceptGroupInviteCompressedInstruction(
 
   // Pack Light System accounts + Merkle trees
   const remainingAccounts = packLightSystemAccounts(
+    undefined,
+    undefined,
     compressedAccount.treeInfo.tree,
     compressedAccount.treeInfo.queue
   );
-  const stateTreeIndex = 6;
-  const stateQueueIndex = 7;
+  const stateTreeIndex = 5; // After 5 Light System accounts (V1)
+  const stateQueueIndex = 6;
   const outputStateTreeIndex = 0;
 
   // Build instruction data
@@ -1363,7 +1400,15 @@ export async function createAcceptGroupInviteCompressedInstruction(
   const data = Buffer.concat([
     DISCRIMINATORS.accept_group_invite_compressed,
     serializeValidityProof(validityProof),
-    serializeCompressedAccountMeta(stateTreeIndex, stateQueueIndex, address, outputStateTreeIndex),
+    serializeCompressedAccountMeta(
+      validityProof.rootIndices[0],
+      validityProof.proveByIndices[0],
+      stateTreeIndex,
+      stateQueueIndex,
+      validityProof.leafIndices[0],
+      address,
+      outputStateTreeIndex
+    ),
     Buffer.from(groupId),
     inviter.toBuffer(),
     payer.toBuffer(),
@@ -1438,6 +1483,7 @@ export async function createRejectGroupInviteCompressedInstruction(
       queue: compressedAccount.treeInfo.queue,
     }];
 
+    // Use V0 proof API (V2 account structure is separate from proof version)
     validityProof = await lightRpc.getValidityProofV0(hashes, []);
   } catch (error) {
     console.error('Failed to get validity proof:', error);
@@ -1446,11 +1492,13 @@ export async function createRejectGroupInviteCompressedInstruction(
 
   // Pack Light System accounts + Merkle trees
   const remainingAccounts = packLightSystemAccounts(
+    undefined,
+    undefined,
     compressedAccount.treeInfo.tree,
     compressedAccount.treeInfo.queue
   );
-  const stateTreeIndex = 6;
-  const stateQueueIndex = 7;
+  const stateTreeIndex = 5; // After 5 Light System accounts (V1)
+  const stateQueueIndex = 6;
   const outputStateTreeIndex = 0;
 
   // Build instruction data
@@ -1460,7 +1508,15 @@ export async function createRejectGroupInviteCompressedInstruction(
   const data = Buffer.concat([
     DISCRIMINATORS.reject_group_invite_compressed,
     serializeValidityProof(validityProof),
-    serializeCompressedAccountMeta(stateTreeIndex, stateQueueIndex, address, outputStateTreeIndex),
+    serializeCompressedAccountMeta(
+      validityProof.rootIndices[0],
+      validityProof.proveByIndices[0],
+      stateTreeIndex,
+      stateQueueIndex,
+      validityProof.leafIndices[0],
+      address,
+      outputStateTreeIndex
+    ),
     Buffer.from(groupId),
     inviter.toBuffer(),
     payer.toBuffer(),
