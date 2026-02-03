@@ -889,7 +889,8 @@ export function deserializeGroupKeyShare(data: Buffer): GroupKeyShare {
 
 // Import Light Protocol SDK
 // Note: lightRpc is already configured in config.ts
-import { lightRpc } from '../config';
+// TODO: Re-enable after fixing Light Protocol bundling
+// import { lightRpc } from '../config';
 
 /**
  * Helper: Derive compressed address using Light Protocol

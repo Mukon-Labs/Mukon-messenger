@@ -13,8 +13,9 @@ export const BACKEND_URL = __DEV__
 export const SOLANA_RPC_URL = 'https://devnet.helius-rpc.com/?api-key=0815e357-862c-4209-bdbe-2329e2e032d5';
 
 // Light Protocol RPC (wraps Helius for ZK Compression support)
-import { createRpc } from '@lightprotocol/stateless.js';
-export const lightRpc = createRpc(SOLANA_RPC_URL, SOLANA_RPC_URL);
+// TODO: Re-enable after installing @lightprotocol/stateless.js and verifying Metro compatibility
+// import { createRpc } from '@lightprotocol/stateless.js';
+// export const lightRpc = createRpc(SOLANA_RPC_URL, SOLANA_RPC_URL);
 
 // Quick reference:
 // Home WiFi example: 'http://192.168.1.33:3001'
