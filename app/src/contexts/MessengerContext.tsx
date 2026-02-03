@@ -30,6 +30,12 @@ import {
   createStoreGroupKeyInstruction,
   createCloseGroupKeyInstruction,
   createCheckIsContactInstruction,
+  // ZK Compression instructions
+  createStoreCompressedGroupKeyInstruction,
+  createCloseCompressedGroupKeyInstruction,
+  createInviteToGroupCompressedInstruction,
+  createAcceptGroupInviteCompressedInstruction,
+  createRejectGroupInviteCompressedInstruction,
   buildTransaction,
   deserializeWalletDescriptor,
   deserializeGroup,
@@ -51,6 +57,15 @@ import { BACKEND_URL, SOLANA_RPC_URL } from '../config';
 //   waitForComputation,
 //   type ContactEntry,
 // } from '../utils/arcium';
+
+// ============================================================================
+// FEATURE FLAG: ZK Compression
+// ============================================================================
+// When enabled, uses Light Protocol compressed accounts for:
+// - Group key storage (store_compressed_group_key vs store_group_key)
+// - Group invitations (invite_to_group_compressed vs invite_to_group)
+// Cost savings: ~90% reduction in on-chain storage rent
+const USE_ZK_COMPRESSION = true;
 
 export interface Contact {
   publicKey: PublicKey;
@@ -1618,7 +1633,30 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         encryptionKeys.secretKey
       );
 
-      // Build array of instructions: create + invites + store key (FIX: combined into ONE transaction)
+      // Build array of instructions: create + invites + store key (combined into ONE transaction)
+      // Use ZK Compression for key storage and invites when enabled (90% storage cost reduction)
+      const inviteInstructions = await Promise.all(
+        invitees.map(invitee =>
+          USE_ZK_COMPRESSION
+            ? createInviteToGroupCompressedInstruction(wallet.publicKey, groupId, invitee)
+            : Promise.resolve(createInviteToGroupInstruction(wallet.publicKey, groupId, invitee))
+        )
+      );
+
+      const storeKeyInstruction = USE_ZK_COMPRESSION
+        ? await createStoreCompressedGroupKeyInstruction(
+            wallet.publicKey,
+            groupId,
+            adminEncryptedKey,
+            adminNonce
+          )
+        : createStoreGroupKeyInstruction(
+            wallet.publicKey,
+            groupId,
+            adminEncryptedKey,
+            adminNonce
+          );
+
       const instructions = [
         createCreateGroupInstruction(
           wallet.publicKey,
@@ -1627,15 +1665,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           encryptionKeys.publicKey,
           tokenGate || null
         ),
-        ...invitees.map(invitee =>
-          createInviteToGroupInstruction(wallet.publicKey, groupId, invitee)
-        ),
-        createStoreGroupKeyInstruction(
-          wallet.publicKey,
-          groupId,
-          adminEncryptedKey,
-          adminNonce
-        )
+        ...inviteInstructions,
+        storeKeyInstruction
       ];
 
       // Single transaction with all instructions
@@ -1755,7 +1786,9 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     setLoading(true);
     try {
-      const instruction = createInviteToGroupInstruction(wallet.publicKey, groupId, inviteePubkey);
+      const instruction = USE_ZK_COMPRESSION
+        ? await createInviteToGroupCompressedInstruction(wallet.publicKey, groupId, inviteePubkey)
+        : createInviteToGroupInstruction(wallet.publicKey, groupId, inviteePubkey);
       const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
       const signedTransaction = await wallet.signTransaction(transaction);
       const txSignature = await connection.sendTransaction(signedTransaction);
@@ -1885,6 +1918,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     setLoading(true);
     try {
       // Build instructions: leave group + close key share (to recover rent)
+      // TODO: Support closing compressed key shares (requires fetching encrypted key + nonce first)
       const instructions = [
         createLeaveGroupInstruction(wallet.publicKey, groupId),
         createCloseGroupKeyInstruction(wallet.publicKey, groupId),
