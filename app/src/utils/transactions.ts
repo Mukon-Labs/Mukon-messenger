@@ -917,10 +917,10 @@ async function deriveCompressedAddress(
   // Convert seeds to Uint8Array format expected by SDK
   const seedsArray = seeds.map(s => new Uint8Array(s));
 
-  // Derive address seed (combines all seeds)
-  const addressSeed = deriveAddressSeed(seedsArray, programId);
+  // Derive address seed (V2: no programId here)
+  const addressSeed = deriveAddressSeed(seedsArray);
 
-  // Derive the compressed address
+  // Derive the compressed address (V2: programId goes here)
   const address = lightDeriveAddress(addressSeed, addressTree, programId);
 
   return { address, addressTree, addressQueue };
