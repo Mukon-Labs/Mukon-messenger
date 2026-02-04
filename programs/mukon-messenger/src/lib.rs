@@ -1,10 +1,9 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Token, TokenAccount};
 use sha2::{Digest, Sha256};
-// ARCIUM TEMPORARILY DISABLED - Re-enable after core demo
-// use arcium_anchor::prelude::*;
-// use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
-// use arcium_macros::{circuit_hash, comp_def_offset};
+use arcium_anchor::prelude::*;
+use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
+use arcium_macros::circuit_hash;
 
 // Light Protocol ZK Compression imports (V2)
 use light_sdk::{
@@ -20,17 +19,15 @@ use light_sdk::{
     LightHasher,
 };
 
-declare_id!("GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj");
+declare_id!("Azw2mvDpmXzHsU46WzumXhzPAZKpRsrXBvHUfFHz2EB5");
 
 // CPI signer for Light System Program calls
 pub const LIGHT_CPI_SIGNER: CpiSigner =
     light_sdk::derive_light_cpi_signer!("GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj");
 
-// ARCIUM TEMPORARILY DISABLED
-// const COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT: u32 = comp_def_offset!("is_accepted_contact");
-// const COMP_DEF_OFFSET_COUNT_ACCEPTED: u32 = comp_def_offset!("count_accepted");
-// const COMP_DEF_OFFSET_ADD_TWO_NUMBERS: u32 = comp_def_offset!("add_two_numbers");
-// const SIGN_PDA_SEED: [u8; 20] = *b"ArciumSignerAccount";
+const COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT: u32 = comp_def_offset("is_accepted_contact");
+const COMP_DEF_OFFSET_COUNT_ACCEPTED: u32 = comp_def_offset("count_accepted");
+const COMP_DEF_OFFSET_ADD_TWO_NUMBERS: u32 = comp_def_offset("add_two_numbers");
 
 #[error_code]
 pub enum ErrorCode {
@@ -62,11 +59,10 @@ pub enum ErrorCode {
     InvalidTokenAccount,
     #[msg("Unauthorized")]
     Unauthorized,
-    // ARCIUM TEMPORARILY DISABLED
-    // #[msg("Computation aborted")]
-    // AbortedComputation,
-    // #[msg("Cluster not set")]
-    // ClusterNotSet,
+    #[msg("Computation aborted")]
+    AbortedComputation,
+    #[msg("Cluster not set")]
+    ClusterNotSet,
 }
 
 // Deterministic hash function for chat PDAs
@@ -92,8 +88,7 @@ fn get_chat_hash(a: Pubkey, b: Pubkey) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-// ARCIUM TEMPORARILY DISABLED - using regular #[program] instead
-#[program]
+#[arcium_program]
 pub mod mukon_messenger {
     use super::*;
 
@@ -1042,9 +1037,7 @@ pub mod mukon_messenger {
     }
 
     // ========== ARCIUM MPC INSTRUCTIONS ==========
-    // TEMPORARILY DISABLED - Re-enable after core demo
 
-    /*
     /// Initialize computation definition for is_accepted_contact circuit
     pub fn init_is_accepted_contact_comp_def(ctx: Context<InitIsAcceptedContactCompDef>) -> Result<()> {
         init_comp_def(
@@ -1091,8 +1084,10 @@ pub mod mukon_messenger {
     pub fn check_is_contact(
         ctx: Context<CheckIsContact>,
         computation_offset: u64,
-        encrypted_contact_list: Vec<u8>,
-        encrypted_query_pubkey: Vec<u8>,
+        contact_list_account: Pubkey,
+        contact_list_offset: u32,
+        contact_list_length: u32,
+        encrypted_query_pubkey: [u8; 32],
         pub_key: [u8; 32],
         nonce_list: u128,
         nonce_query: u128,
@@ -1100,10 +1095,10 @@ pub mod mukon_messenger {
         let args = ArgBuilder::new()
             .x25519_pubkey(pub_key)
             .plaintext_u128(nonce_list)
-            .encrypted_bytes(encrypted_contact_list)
+            .account(contact_list_account, contact_list_offset, contact_list_length)
             .x25519_pubkey(pub_key)
             .plaintext_u128(nonce_query)
-            .encrypted_bytes(encrypted_query_pubkey)
+            .encrypted_u8(encrypted_query_pubkey)
             .build();
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
@@ -1112,8 +1107,7 @@ pub mod mukon_messenger {
             ctx.accounts,
             computation_offset,
             args,
-            None,
-            vec![CheckIsContactCallback::callback_ix(
+            vec![IsAcceptedContactCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
                 &[],
@@ -1128,8 +1122,8 @@ pub mod mukon_messenger {
 
     /// Callback for is_accepted_contact computation
     #[arcium_callback(encrypted_ix = "is_accepted_contact")]
-    pub fn check_is_contact_callback(
-        ctx: Context<CheckIsContactCallback>,
+    pub fn is_accepted_contact_callback(
+        ctx: Context<IsAcceptedContactCallback>,
         output: SignedComputationOutputs<IsAcceptedContactOutput>,
     ) -> Result<()> {
         let result = match output.verify_output(
@@ -1157,14 +1151,16 @@ pub mod mukon_messenger {
     pub fn count_accepted_contacts(
         ctx: Context<CountAcceptedContacts>,
         computation_offset: u64,
-        encrypted_contact_list: Vec<u8>,
+        contact_list_account: Pubkey,
+        contact_list_offset: u32,
+        contact_list_length: u32,
         pub_key: [u8; 32],
         nonce_list: u128,
     ) -> Result<()> {
         let args = ArgBuilder::new()
             .x25519_pubkey(pub_key)
             .plaintext_u128(nonce_list)
-            .encrypted_bytes(encrypted_contact_list)
+            .account(contact_list_account, contact_list_offset, contact_list_length)
             .build();
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
@@ -1173,8 +1169,7 @@ pub mod mukon_messenger {
             ctx.accounts,
             computation_offset,
             args,
-            None,
-            vec![CountAcceptedContactsCallback::callback_ix(
+            vec![CountAcceptedCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
                 &[],
@@ -1189,8 +1184,8 @@ pub mod mukon_messenger {
 
     /// Callback for count_accepted computation
     #[arcium_callback(encrypted_ix = "count_accepted")]
-    pub fn count_accepted_contacts_callback(
-        ctx: Context<CountAcceptedContactsCallback>,
+    pub fn count_accepted_callback(
+        ctx: Context<CountAcceptedCallback>,
         output: SignedComputationOutputs<CountAcceptedOutput>,
     ) -> Result<()> {
         let result = match output.verify_output(
@@ -1213,7 +1208,6 @@ pub mod mukon_messenger {
         msg!("count_accepted computation completed");
         Ok(())
     }
-    */
 }
 
 // ========== ACCOUNT STRUCTURES ==========
@@ -1770,8 +1764,6 @@ pub struct RejectGroupInviteCompressed<'info> {
 
 // ========== ARCIUM MPC CONTEXT STRUCTURES ==========
 
-// ARCIUM ACCOUNT STRUCTS - TEMPORARILY DISABLED
-/*
 /// Context for initializing is_accepted_contact computation definition
 #[init_computation_definition_accounts("is_accepted_contact", payer)]
 #[derive(Accounts)]
@@ -1783,6 +1775,12 @@ pub struct InitIsAcceptedContactCompDef<'info> {
     /// CHECK: not initialized yet
     #[account(mut)]
     pub comp_def_account: UncheckedAccount<'info>,
+    /// CHECK: validated by arcium via derive_mxe_lut_pda
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    pub address_lookup_table: UncheckedAccount<'info>,
+    /// CHECK: validated by address constraint
+    #[account(address = LUT_PROGRAM_ID)]
+    pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
 }
@@ -1798,6 +1796,12 @@ pub struct InitCountAcceptedCompDef<'info> {
     /// CHECK: not initialized yet
     #[account(mut)]
     pub comp_def_account: UncheckedAccount<'info>,
+    /// CHECK: validated by arcium via derive_mxe_lut_pda
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    pub address_lookup_table: UncheckedAccount<'info>,
+    /// CHECK: validated by address constraint
+    #[account(address = LUT_PROGRAM_ID)]
+    pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
 }
@@ -1813,6 +1817,12 @@ pub struct InitAddTwoNumbersCompDef<'info> {
     /// CHECK: not initialized yet
     #[account(mut)]
     pub comp_def_account: UncheckedAccount<'info>,
+    /// CHECK: validated by arcium via derive_mxe_lut_pda
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    pub address_lookup_table: UncheckedAccount<'info>,
+    /// CHECK: validated by address constraint
+    #[account(address = LUT_PROGRAM_ID)]
+    pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
 }
@@ -1852,7 +1862,7 @@ pub struct CheckIsContact<'info> {
 /// Context for is_accepted_contact callback
 #[callback_accounts("is_accepted_contact")]
 #[derive(Accounts)]
-pub struct CheckIsContactCallback<'info> {
+pub struct IsAcceptedContactCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
@@ -1902,7 +1912,7 @@ pub struct CountAcceptedContacts<'info> {
 /// Context for count_accepted callback
 #[callback_accounts("count_accepted")]
 #[derive(Accounts)]
-pub struct CountAcceptedContactsCallback<'info> {
+pub struct CountAcceptedCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_COUNT_ACCEPTED))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
@@ -1934,4 +1944,3 @@ pub struct ContactCountResult {
     pub nonce: u128,
     pub encryption_key: [u8; 32],
 }
-*/
