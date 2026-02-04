@@ -1299,27 +1299,43 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     }
   };
 
+  // Debounce loadContacts to avoid 403 rate-limits on getProgramAccounts
+  const loadContactsLastCall = useRef<number>(0);
+  const loadContactsPending = useRef<boolean>(false);
+
   const loadContacts = async () => {
     if (!wallet?.publicKey) return;
+
+    // Debounce: skip if called within last 3 seconds
+    const now = Date.now();
+    if (now - loadContactsLastCall.current < 3000) {
+      if (!loadContactsPending.current) {
+        loadContactsPending.current = true;
+        setTimeout(() => {
+          loadContactsPending.current = false;
+          loadContacts();
+        }, 3000);
+      }
+      return;
+    }
+    loadContactsLastCall.current = now;
 
     try {
       const myKey = wallet.publicKey;
 
-      // Find all Relationship PDAs where I'm user_a (offset 8) or user_b (offset 40)
-      const [asA, asB] = await Promise.all([
-        connection.getProgramAccounts(PROGRAM_ID, {
-          filters: [
-            { dataSize: 82 },
-            { memcmp: { offset: 8, bytes: myKey.toBase58() } },
-          ],
-        }),
-        connection.getProgramAccounts(PROGRAM_ID, {
-          filters: [
-            { dataSize: 82 },
-            { memcmp: { offset: 40, bytes: myKey.toBase58() } },
-          ],
-        }),
-      ]);
+      // Sequential to avoid double-hitting RPC rate limits
+      const asA = await connection.getProgramAccounts(PROGRAM_ID, {
+        filters: [
+          { dataSize: 82 },
+          { memcmp: { offset: 8, bytes: myKey.toBase58() } },
+        ],
+      });
+      const asB = await connection.getProgramAccounts(PROGRAM_ID, {
+        filters: [
+          { dataSize: 82 },
+          { memcmp: { offset: 40, bytes: myKey.toBase58() } },
+        ],
+      });
 
       const allRelationships = [...asA, ...asB];
       console.log('Found', allRelationships.length, 'relationships');
