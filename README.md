@@ -8,7 +8,7 @@ Built for the Solana Privacy Hackathon (Jan 12-30, 2026)
 
 ## 🚀 Live Demo
 
-**Program ID (Devnet):** `GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj`
+**Program ID (Devnet):** `54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy`
 
 **Backend:** https://backend-rough-bird-7310.fly.dev
 
@@ -154,7 +154,7 @@ adb install mukon-debug.apk
 
 ### Layer 1: On-Chain (Solana Program)
 
-**Program ID:** `GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj`
+**Program ID:** `54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy`
 
 **Accounts:**
 - `UserProfile` - Display name, avatar, encryption public key
@@ -690,7 +690,7 @@ mukon-messenger/
 ## Deployment
 
 **Devnet (Current):**
-- Program: `GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj`
+- Program: `54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy`
 - Backend: https://backend-rough-bird-7310.fly.dev
 - Status: ✅ Live and operational
 

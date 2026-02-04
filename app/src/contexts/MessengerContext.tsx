@@ -2140,7 +2140,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       // Strategy: Find all GroupInvite accounts where this user is the invitee with status=Accepted
       // Then fetch the corresponding Group account for each
-      const PROGRAM_ID = new PublicKey('GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj');
+      const PROGRAM_ID = new PublicKey('54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy');
 
       const accounts = await connection.getProgramAccounts(PROGRAM_ID, {
         filters: [
@@ -2245,7 +2245,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     try {
       console.log('📬 Loading group invites...');
-      const PROGRAM_ID = new PublicKey('GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj');
+      const PROGRAM_ID = new PublicKey('54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy');
 
       // Query GroupInvite accounts where invitee = wallet.publicKey
       const accounts = await connection.getProgramAccounts(PROGRAM_ID, {

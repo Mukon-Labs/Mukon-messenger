@@ -19,11 +19,11 @@ use light_sdk::{
     LightHasher,
 };
 
-declare_id!("Azw2mvDpmXzHsU46WzumXhzPAZKpRsrXBvHUfFHz2EB5");
+declare_id!("54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy");
 
 // CPI signer for Light System Program calls
 pub const LIGHT_CPI_SIGNER: CpiSigner =
-    light_sdk::derive_light_cpi_signer!("GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj");
+    light_sdk::derive_light_cpi_signer!("54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy");
 
 const COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT: u32 = comp_def_offset("is_accepted_contact");
 const COMP_DEF_OFFSET_COUNT_ACCEPTED: u32 = comp_def_offset("count_accepted");

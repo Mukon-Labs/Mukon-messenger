@@ -5,7 +5,7 @@ mod circuits {
     use arcis::*;
 
     /// Maximum number of contacts (fixed-size for MPC compatibility)
-    const MAX_CONTACTS: usize = 100;
+    const MAX_CONTACTS: usize = 2;
 
     /// Encrypted contact entry
     #[derive(Debug, Clone, Copy)]

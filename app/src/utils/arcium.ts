@@ -23,7 +23,7 @@ import { PublicKey, Connection } from '@solana/web3.js';
 import { randomBytes } from 'react-native-get-random-values';
 
 export const ARCIUM_CLUSTER_OFFSET = 456;
-export const PROGRAM_ID = new PublicKey('GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj');
+export const PROGRAM_ID = new PublicKey('54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy');
 
 export interface ContactEntry {
   pubkey: Uint8Array;  // 32 bytes

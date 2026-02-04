@@ -18,7 +18,7 @@ import {
   type ValidityProofWithContext
 } from '@lightprotocol/stateless.js';
 
-const PROGRAM_ID = new PublicKey('GCTzU7Y6yaBNzW6WA1EJR6fnY9vLNZEEPcgsydCD8mpj');
+const PROGRAM_ID = new PublicKey('54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy');
 
 // Instruction discriminators from IDL
 // NOTE: Group discriminators need to be computed after program deployment
