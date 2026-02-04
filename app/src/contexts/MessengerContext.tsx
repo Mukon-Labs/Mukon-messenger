@@ -393,6 +393,11 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
           if (!accountInfo) {
             console.warn(`⚠️ No on-chain key backup found for group ${groupIdHex.slice(0, 8)}...`);
+            // Fallback: request key from online group members via socket
+            if (socket) {
+              socket.emit('request_group_key', { groupId: groupIdHex });
+              console.log(`🔑 Requested key via socket for group ${groupIdHex.slice(0, 8)}...`);
+            }
             continue;
           }
 
@@ -424,7 +429,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     };
 
     recoverMissingKeys();
-  }, [wallet?.publicKey, encryptionKeys, groups, groupKeys]);
+  }, [wallet?.publicKey, encryptionKeys, groups, groupKeys, socket]);
 
   // Initialize socket connection (ONE instance for entire app)
   useEffect(() => {
@@ -769,6 +774,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
               console.log('✅ Group key decrypted and stored locally');
 
               // Auto-backup to on-chain after a delay (to avoid back-to-back wallet prompts)
+              // Note: Requires user to manually trigger from GroupChatScreen if they want on-chain backup
               setTimeout(async () => {
                 try {
                   // Check if already backed up
@@ -779,13 +785,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
                     return;
                   }
 
-                  const { storeGroupKeyOnChain } = await import('../utils/encryption');
-                  const groupIdBytes = Buffer.from(groupId, 'hex');
-                  await storeGroupKeyOnChain(wallet!, connection, decryptedKey, groupIdBytes);
-                  await AsyncStorage.setItem(backupKey, 'true');
-                  console.log('✅ Group key auto-backed up on-chain');
+                  // Skip auto-backup for now (user can manually trigger from group settings)
+                  console.log('⏭️ Skipping auto on-chain backup (manual trigger available in group settings)');
                 } catch (error) {
-                  console.warn('⚠️ Auto-backup failed (user may need to trigger manually):', error);
+                  console.warn('⚠️ Auto-backup check failed:', error);
                 }
               }, 10000); // 10s delay
             } else {
@@ -797,6 +800,58 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         } catch (error) {
           console.error('❌ Failed to decrypt group key:', error);
         }
+      }
+    });
+
+    // Respond to group key requests from members who missed the initial share
+    newSocket.on('group_key_needed', async ({ groupId, requesterPubkey }) => {
+      console.log(`🔑 Group key requested by ${requesterPubkey.slice(0, 8)}... for ${groupId.slice(0, 8)}...`);
+
+      const currentGroupKeys = groupKeysRef.current;
+      const currentEncryptionKeys = encryptionKeysRef.current;
+      const groupSecret = currentGroupKeys.get(groupId);
+
+      if (!groupSecret || !currentEncryptionKeys) {
+        console.log('⏭️ We don\'t have the key for this group, ignoring request');
+        return;
+      }
+
+      try {
+        // Get requester's encryption pubkey (from contacts or on-chain)
+        const currentContacts = contactsRef.current;
+        let requesterEncryptionPubkey = currentContacts.find(
+          c => c.publicKey.toBase58() === requesterPubkey
+        )?.encryptionPublicKey;
+
+        if (!requesterEncryptionPubkey) {
+          const requesterPubkeyObj = new PublicKey(requesterPubkey);
+          const profilePDA = getUserProfilePDA(requesterPubkeyObj);
+          const profileAccount = await connection.getAccountInfo(profilePDA);
+          if (profileAccount) {
+            const data = profileAccount.data;
+            requesterEncryptionPubkey = new Uint8Array(data.slice(data.length - 32));
+          }
+        }
+
+        if (requesterEncryptionPubkey) {
+          const nonce = nacl.randomBytes(nacl.box.nonceLength);
+          const encryptedKey = nacl.box(
+            groupSecret,
+            nonce,
+            requesterEncryptionPubkey,
+            currentEncryptionKeys.secretKey
+          );
+
+          newSocket.emit('share_group_key', {
+            groupId,
+            recipientPubkey: requesterPubkey,
+            encryptedKey: Buffer.from(encryptedKey).toString('base64'),
+            nonce: Buffer.from(nonce).toString('base64'),
+          });
+          console.log(`✅ Shared group key with ${requesterPubkey.slice(0, 8)}... (on-demand)`);
+        }
+      } catch (err) {
+        console.error('Failed to share group key on demand:', err);
       }
     });
 
@@ -2399,6 +2454,12 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         updated.delete(groupId);
         return updated;
       });
+
+      // Request group key if we don't have it (triggers broadcast to room members)
+      if (!groupKeysRef.current.has(groupId)) {
+        console.log(`🔑 Missing key for group ${groupId.slice(0, 8)}..., requesting from room members`);
+        socket.emit('request_group_key', { groupId });
+      }
 
       // Fetch group avatar (Fix 4)
       socket.emit('get_group_avatar', { groupId }, (avatar: string | null) => {

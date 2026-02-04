@@ -502,7 +502,12 @@ io.on('connection', (socket) => {
       pendingKeyShares.get(groupId).delete(socket.publicKey);
       console.log(`🔑 Delivered pending key share for ${groupId.slice(0, 8)}... to ${socket.publicKey.slice(0, 8)}...`);
     } else {
-      console.log(`⚠️ No pending key share found for ${socket.publicKey.slice(0, 8)}... in group ${groupId.slice(0, 8)}...`);
+      // No pending share — ask other online group members to share their key
+      console.log(`⚠️ No pending key share, broadcasting key request to group room ${groupId.slice(0, 8)}...`);
+      socket.to(`group_${groupId}`).emit('group_key_needed', {
+        groupId,
+        requesterPubkey: socket.publicKey,
+      });
     }
   });
 

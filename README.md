@@ -172,7 +172,7 @@ adb install mukon-debug.apk
 
 **Instructions:**
 ```rust
-// DM Instructions (10)
+// DM Instructions (9)
 register()                  // Create profile
 update_profile()            // Update name/avatar/encryption key
 invite()                    // Create Relationship PDA + Conversation PDA

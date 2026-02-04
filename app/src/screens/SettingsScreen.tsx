@@ -118,12 +118,12 @@ export default function SettingsScreen() {
 
         <List.Item
           title="Program ID"
-          description="DGAPfs1...HbySabv"
+          description="54QTyrUR...bf359d"
           left={(props) => <List.Icon {...props} icon="code-braces" />}
           onPress={() => {
             showAlert(
               'Program ID',
-              'DGAPfs1DAjt5p5J5Z5trtgCeFBWMfh2mck2ZqHbySabv\n\nRunning on Solana Devnet'
+              '54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy\n\nRunning on Solana Devnet'
             );
           }}
           style={styles.listItem}

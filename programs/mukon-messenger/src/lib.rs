@@ -344,6 +344,18 @@ pub mod mukon_messenger {
         Ok(())
     }
 
+    /// Close a Relationship PDA and return rent (either party can close)
+    pub fn close_relationship(ctx: Context<CloseRelationship>) -> Result<()> {
+        let relationship_lamports = ctx.accounts.relationship.to_account_info().lamports();
+        **ctx.accounts.relationship.to_account_info().lamports.borrow_mut() = 0;
+        **ctx.accounts.payer.lamports.borrow_mut() += relationship_lamports;
+        ctx.accounts.relationship.to_account_info().try_borrow_mut_data()?.fill(0);
+
+        msg!("Relationship closed: {:?} <-> {:?}",
+             ctx.accounts.user_a.key(), ctx.accounts.user_b.key());
+        Ok(())
+    }
+
     // ========== GROUP CHAT INSTRUCTIONS ==========
 
     pub fn create_group(
@@ -1424,6 +1436,24 @@ pub struct Unblock<'info> {
     /// CHECK: must be min(payer, peer) — validated in instruction
     pub user_a: AccountInfo<'info>,
     /// CHECK: must be max(payer, peer) — validated in instruction
+    pub user_b: AccountInfo<'info>,
+    #[account(
+        mut,
+        seeds = [b"relationship", user_a.key().as_ref(), user_b.key().as_ref(), RELATIONSHIP_VERSION.as_ref()],
+        bump
+    )]
+    pub relationship: Account<'info, Relationship>,
+}
+
+#[derive(Accounts)]
+pub struct CloseRelationship<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: the other party in the relationship
+    pub peer: AccountInfo<'info>,
+    /// CHECK: must be min(payer, peer)
+    pub user_a: AccountInfo<'info>,
+    /// CHECK: must be max(payer, peer)
     pub user_b: AccountInfo<'info>,
     #[account(
         mut,

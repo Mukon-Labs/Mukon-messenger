@@ -15,7 +15,7 @@ import nacl from 'tweetnacl';
 import { Buffer } from 'buffer';
 import bs58 from 'bs58';
 
-const PROGRAM_ID = new PublicKey('89MdH36FUjSYaZ47VAtPD21THprGpKkta8Qd26wGvnBr');
+const PROGRAM_ID = new PublicKey('54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy');
 // For physical device via ADB/WiFi, use host machine's actual IP on local network
 // Find host IP with: ifconfig | grep "inet " | grep -v 127.0.0.1
 const BACKEND_URL = 'http://10.206.4.164:3001';
