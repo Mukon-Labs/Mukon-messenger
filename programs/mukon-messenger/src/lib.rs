@@ -225,6 +225,14 @@ pub mod mukon_messenger {
         let (expected_a, expected_b) = canonical_order(inviter.key(), invitee.key());
         require!(user_a == expected_a && user_b == expected_b, ErrorCode::InvalidHash);
 
+        // If PDA already exists (re-invite), only allow from Rejected or Empty state
+        if relationship.user_a != Pubkey::default() {
+            require!(
+                relationship.status_a == STATUS_REJECTED && relationship.status_b == STATUS_REJECTED,
+                ErrorCode::AlreadyInvited
+            );
+        }
+
         relationship.user_a = user_a;
         relationship.user_b = user_b;
         relationship.created_at = Clock::get()?.unix_timestamp;
@@ -1335,7 +1343,7 @@ pub struct Invite<'info> {
     /// CHECK: must be max(payer, invitee) — validated in instruction
     pub user_b: AccountInfo<'info>,
     #[account(
-        init,
+        init_if_needed,
         payer = payer,
         space = 82,  // 8 + 32 + 32 + 1 + 1 + 8
         seeds = [b"relationship", user_a.key().as_ref(), user_b.key().as_ref(), RELATIONSHIP_VERSION.as_ref()],
