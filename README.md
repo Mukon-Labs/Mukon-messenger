@@ -308,200 +308,31 @@ This is **impossible** in WhatsApp/Signal because they don't have blockchain. We
 
 **Status:** ✅ Live on devnet (v0.7.0) — 3 computation definitions deployed
 
-### What is Arcium?
+Arcium is a Multi-Party Computation (MPC) network on Solana that allows computation on **encrypted data** without revealing the data itself. We use it to verify contact relationships and count contacts privately — no one can see your social graph.
 
-Arcium is a Multi-Party Computation (MPC) network on Solana that allows computation on **encrypted data** without revealing the data itself.
-
-### What We Use It For
-
-**Contact Relationship Privacy:**
-
-Without Arcium:
-- Anyone can query `Relationship` PDAs on-chain
-- See contact statuses (invited, accepted, blocked)
-- Map social graphs by analyzing all relationships
-- **Your social network is public**
-
-With Arcium:
-- Relationship status verified privately via MPC
-- Can prove "Alice and I are mutual contacts" without revealing status to others
-- MPC nodes compute on encrypted data, return encrypted result
-- **Your social network is private**
-
-**Group Member Privacy:**
-
-Without Arcium:
-- `Group` account lists all members publicly
-- Anyone can see who's in which groups
-- **Group membership is public**
-
-With Arcium:
-- Member lists encrypted on-chain
-- Can prove membership without revealing full list
-- **Group membership is private**
-
-### Implementation Details
-
-**Circuits (Arcium v0.7.0):**
-
-| Circuit | ACUs | Status | Description |
+| Circuit | Cost | Status | Description |
 |---------|------|--------|-------------|
-| `is_mutual_contact` | ~30K gates | **LIVE** | Check if both sides of a Relationship have Accepted status |
-| `count_accepted` | 507M | **LIVE** | Count accepted contacts privately |
-| `add_two_numbers` | 473M | **LIVE** | Demo/testing circuit |
+| `is_mutual_contact` | ~30K gates | **LIVE** | Verify both sides of a relationship are Accepted |
+| `count_accepted` | 507M ACUs | **LIVE** | Count accepted contacts privately |
+| `add_two_numbers` | 473M ACUs | **LIVE** | Demo/testing circuit |
 
-**Architecture Pivot (Feb 4):**
-
-The original `is_accepted_contact` circuit was blocked at 1.17B ACUs (Arcium limit ~700-800M) because comparing encrypted 32-byte pubkeys is too expensive. The per-relationship PDA model solves this by comparing two `u8` status values instead — reducing cost from 1.17B ACUs to ~30K gates.
-
-**Program Integration:**
-- 8 Arcium instructions (3 init_comp_def, 2 queue, 2 callback, 1 check_mutual_contact)
-- Deployed with `arcium deploy --cluster-offset 456`
-- MXE Account: `5EJeKvZL6dPFcNuVVUWctDzZLU16pJA4sucg3ysPXJdr`
-
-See `.dev/ARCIUM_INTEGRATION.md` for detailed implementation.
+**Architecture note:** We originally built an `is_accepted_contact` circuit that compared encrypted 32-byte pubkeys, but it hit 1.17B ACUs (Arcium limit ~700-800M). We pivoted to per-relationship PDAs with `u8` status values — dropping cost from 1.17B to ~30K gates while improving the data model (O(1) lookup, 82 bytes per relationship vs 6.9KB for a 100-contact list).
 
 ---
 
 ## Light Protocol ZK Compression
 
-**Status:** ✅ V2 Architecture Complete | ⚠️ Disabled on Devnet (Infrastructure Limitation)
+**Status:** ✅ V2 Architecture Complete | ⚠️ Disabled on Devnet
 
-### What is Light Protocol ZK Compression?
+Light Protocol enables compressed accounts on Solana — state stored as hashes in Merkle trees with ZK validity proofs, reducing storage costs by ~90%.
 
-Light Protocol enables "compressed accounts" on Solana - a ZK-powered compression system that reduces state costs by ~90% while maintaining L1 security and composability.
+**What we built:**
+- 5 compressed instructions (group key storage, group invites, accept/reject)
+- light-sdk 0.17 V2 CPI integration with 6-account structure
+- Client-side proof generation with @lightprotocol/stateless.js
+- Targets: `GroupKeyShare` and `GroupInvite` accounts
 
-Traditional Solana accounts require rent exemption (permanent storage cost). For high-volume accounts like group invites and key shares, this becomes expensive:
-- 30-member group = 30 GroupKeyShare accounts
-- High invitation volume = many pending GroupInvite accounts
-- Each account requires ~0.002 SOL rent
-
-With ZK compression:
-- State stored as hashes in Merkle trees
-- Validity proofs verify state existence via zero-knowledge
-- Significantly reduced storage costs
-- Same security guarantees as regular accounts
-
-### Why This Matters for Mukon
-
-**Target Accounts:**
-- `GroupKeyShare` (148 bytes) - One per member per group
-- `GroupInvite` (113 bytes) - High volume, short-lived
-
-**Cost Savings:**
-- **Regular PDAs:** ~0.002 SOL per account
-- **Compressed:** ~90% reduction in storage costs
-- **Example:** 100 group invites = 0.2 SOL → ~0.02 SOL savings
-
-### Implementation Status
-
-**✅ V2 Architecture Complete (Production-Ready)**
-
-**Program-Side (Rust):**
-- ✅ light-sdk 0.17 with V2 CPI integration
-- ✅ V2 account structure (6 accounts including CPI signer PDA)
-- ✅ Compressed account structs:
-  - `CompressedGroupKeyShare` with fixed-size `[u8; 48]` encrypted_key
-  - `CompressedGroupInvite` with `u8` status field
-- ✅ Five compressed instructions fully implemented:
-  - `store_compressed_group_key` - Store encrypted key as compressed account
-  - `close_compressed_group_key` - Close and recover rent
-  - `invite_to_group_compressed` - Create compressed group invite
-  - `accept_group_invite_compressed` - Accept invite (hybrid: uses regular PDA)
-  - `reject_group_invite_compressed` - Reject invite (hybrid: uses regular PDA)
-- ✅ CPI calls using `light_sdk::cpi::v2::LightSystemProgramCpi`
-- ✅ CPI signer PDA derivation with `derive_light_cpi_signer!` macro
-- ✅ Address derivation using `address::v2::derive_address`
-
-**Client-Side (TypeScript):**
-- ✅ @lightprotocol/stateless.js 0.23.0-beta.5 integrated
-- ✅ V2 account structure implementation (6 accounts):
-  1. Light System Program
-  2. CPI Signer PDA (derived from program)
-  3. Registered Program PDA
-  4. Account Compression Authority
-  5. Account Compression Program
-  6. System Program
-  7. Tree accounts (starting at index 6)
-- ✅ V0 validity proof API (`getValidityProofV0` for cross-version compatibility)
-- ✅ Five instruction builders complete with proof generation
-- ✅ Compressed address derivation matching Rust seeds
-- ✅ Proper serialization of ValidityProof and PackedAddressTreeInfo
-
-**⚠️ Known Issue: Devnet Infrastructure Limitation**
-
-The V2 architecture is **complete and production-ready**, but currently disabled due to devnet-specific infrastructure issues:
-
-**Problem:**
-- Light System Program on devnet panics during `verify_proof` execution
-- Error occurs at ~5400 compute units with "PANICKED" message
-- This is a **devnet indexer limitation**, not a code issue
-- All account structures and CPI calls are architecturally correct
-
-**Current Workaround:**
-- `USE_ZK_COMPRESSION = false` in MessengerContext
-- Fallback to regular PDA operations for all group operations
-- No functionality loss - compression is purely a cost optimization
-
-**Why This Still Matters:**
-- ✅ **Architecture demonstrates advanced Solana/ZK knowledge**
-- ✅ **Code is production-ready for mainnet deployment**
-- ✅ **Shows cost reduction strategy (~90% savings)**
-- ✅ **V2 CPI integration complete (latest Light Protocol API)**
-- ✅ **Proper error handling and fallback mechanisms**
-
-**Deployment Path:**
-```
-Hackathon Demo → Regular PDAs (reliable, proven)
-       ↓
-Mainnet Launch → Enable compression when infrastructure stabilizes
-       ↓
-Cost Savings → ~90% reduction in storage costs at scale
-```
-
-### Technical Details
-
-**V2 CPI Architecture:**
-```
-Client builds proof + V2 accounts → Compressed instruction
-                                          ↓
-Program validates inputs → CPI to Light System v2
-                                          ↓
-                          Light System verifies proof + updates Merkle trees
-```
-
-**Account Structure Comparison:**
-
-| Feature | Regular PDA | Compressed Account (V2) |
-|---------|-------------|-------------------------|
-| Storage | On-chain (full data) | Merkle tree (hash only) |
-| Rent | Required (~0.002 SOL) | Significantly reduced |
-| CPI Structure | Standard accounts | 6 system accounts + trees |
-| Proof Required | No | V0 validity proof |
-| Devnet Status | ✅ Working | ⚠️ Indexer panic |
-| Mainnet Status | ✅ Working | ✅ Expected to work |
-
-**Code Documentation:**
-
-All compressed instructions include clear documentation:
-```rust
-// KNOWN ISSUE: Light Protocol custom CPI fails on devnet with verify_proof panic.
-// This is a devnet infrastructure limitation, not a code issue.
-// Architecture is ready for mainnet deployment when infrastructure stabilizes.
-// Fallback: Use regular PDA versions (invite_to_group, accept_group_invite, etc.)
-```
-
-### Value Proposition
-
-Despite being disabled on devnet, the Light Protocol integration demonstrates:
-
-1. **Technical Depth** - Full V2 implementation with proper CPI structure
-2. **Production Readiness** - Code is mainnet-ready, just waiting on infrastructure
-3. **Cost Optimization Strategy** - Shows understanding of Solana economics
-4. **Advanced Integration** - Successfully integrated complex ZK proof system
-5. **Proper Architecture** - Fallback mechanisms and clear documentation
-
-**This is a feature flag away from deployment, not a failed integration.**
+**Why it's disabled:** Devnet Light System Program panics during `verify_proof`. This is a devnet indexer limitation, not a code issue. The architecture is production-ready — one feature flag (`USE_ZK_COMPRESSION`) away from deployment on mainnet.
 
 ---
 
@@ -578,23 +409,6 @@ anchor test
 
 ---
 
-## Bounty Targets
-
-**Arcium ($10,000):**
-- Best integration - Encrypted contact lists + group members
-- Most encrypted potential - 3 circuits implemented, full privacy architecture
-
-**Open Track ($18,000):**
-- Privacy messenger with wallet-based identity
-- On-chain encrypted storage (differentiator)
-- ZK Compression integration for GroupKeyShare and GroupInvite accounts
-- Foundation implemented, demonstrating cost reduction architecture
-
-**Helius ($5,000):**
-- Use Helius RPC endpoints
-
----
-
 ## Known Limitations (Devnet MVP)
 
 **Current Issues:**
@@ -624,80 +438,32 @@ anchor test
 
 ## Development
 
-### Build System
-
-Three-tier build system for different scenarios:
-
-```bash
-# Regular build (JS/TS changes only)
-npm run build
-
-# Clean build (native module changes, build errors)
-npm run build:clean
-
-# Prebuild (nuclear option, regenerates /android)
-npm run build:prebuild
-```
-
-See `app/BUILD.md` for build decision tree.
-
-### Program Deployment
-
-```bash
-# 1. Build circuits + program
-arcium build
-anchor build
-
-# 2. Deploy to devnet (upgrade only)
-arcium deploy --skip-init --cluster-offset 456 --recovery-set-size 4 \
-  --keypair-path ~/.config/solana/id.json \
-  --rpc-url https://api.devnet.solana.com
-
-# 3. Init comp defs (one-time per circuit)
-npx ts-node --transpile-only scripts/init-comp-defs.ts
-
-# 4. Update discriminators
-node scripts/update-discriminators.js
-
-# 5. Rebuild client
-cd app && npm run build
-```
-
-Discriminators are 8-byte instruction identifiers that must match between client and program.
-
 ### Project Structure
 
 ```
 mukon-messenger/
-├── programs/mukon-messenger/
-│   └── src/lib.rs           # Anchor program (Arcium v0.7.0 + Light Protocol)
-├── app/                      # React Native client
-│   ├── src/
-│   │   ├── contexts/
-│   │   │   ├── MessengerContext.tsx  # Core logic (2,300+ lines)
-│   │   │   └── WalletContext.tsx
-│   │   ├── screens/         # UI screens
-│   │   ├── components/      # Reusable components
-│   │   ├── utils/
-│   │   │   ├── transactions.ts  # Manual tx builders
-│   │   │   ├── encryption.ts    # NaCl utilities
-│   │   │   └── domains.ts       # .sol/.skr resolution
-│   │   └── config.ts        # Backend URL config
-│   └── build-apk.sh         # Build script
-├── backend/                  # WebSocket relay
-│   └── src/index.js         # Socket.IO server (650+ lines)
-├── encrypted-ixs/            # Arcium MPC circuit definitions
-│   └── src/lib.rs           # 3 circuits (is_mutual_contact, count_accepted, add_two_numbers)
-├── build/                    # Compiled Arcium circuits (.arcis, .weight, .hash)
-├── scripts/
-│   ├── update-discriminators.js
-│   └── init-comp-defs.ts    # Initialize Arcium computation definitions
-├── .dev/                     # Development docs
-│   ├── ARCIUM_INTEGRATION.md
-│   ├── LIGHT_PROTOCOL_INTEGRATION.md
-│   ├── CHANGELOG.md
-│   └── CLAUDE.md
-└── README.md                 # This file
+├── programs/mukon-messenger/  # Anchor program (Arcium v0.7.0 + Light Protocol)
+├── encrypted-ixs/             # Arcium MPC circuit definitions
+├── app/                       # React Native + Expo 51 client
+│   └── src/
+│       ├── contexts/MessengerContext.tsx  # Core state/socket logic
+│       ├── utils/transactions.ts         # Manual tx builders
+│       └── screens/                      # UI screens
+├── backend/                   # Socket.IO relay (Fly.io)
+├── build/                     # Compiled Arcium circuits
+└── scripts/                   # Deployment helpers
+```
+
+### Build & Deploy
+
+```bash
+# Client
+cd app && npm install && npm run build
+
+# Program (requires Arcium CLI + Anchor)
+arcium build && anchor build
+arcium deploy --skip-init --cluster-offset 456 --recovery-set-size 4 \
+  --keypair-path ~/.config/solana/id.json --rpc-url https://api.devnet.solana.com
 ```
 
 ---
@@ -707,39 +473,10 @@ mukon-messenger/
 **Devnet (Current):**
 - Program: `54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy`
 - Backend: https://backend-rough-bird-7310.fly.dev
-- Status: ✅ Live and operational
-
-**Mainnet (Post-Hackathon):**
-- [ ] Security audit
-- [ ] Add account versioning
-- [ ] Message persistence (Postgres)
-- [ ] Monitoring (Sentry, UptimeRobot)
-- [ ] Deploy program to mainnet-beta
-- [ ] Deploy backend to production
-- [ ] Submit to Solana Mobile dApp Store
+- Arcium MXE: `5EJeKvZL6dPFcNuVVUWctDzZLU16pJA4sucg3ysPXJdr`
 
 ---
 
-## Acknowledgments
+Built for the **Solana Privacy Hackathon 2026** | Solana + Arcium + Light Protocol + NaCl
 
-Built for the **Solana Privacy Hackathon 2026** (Jan 12-30)
-
-**Technologies:**
-- Solana Labs - Blockchain platform
-- Arcium - MPC encryption network
-- Anchor - Solana development framework
-- Expo - React Native toolchain
-- Fly.io - Backend deployment
-- NaCl - Cryptography library
-
-**Inspiration:**
-- Signal - E2E encryption done right
-- Telegram - Great UX
-- WhatsApp - Mass adoption
-- Muun Wallet - Sovereign identity
-
----
-
-**Built with privacy in mind. Your data, your keys, your sovereignty.**
-
-🔐 **Encrypt everything. Trust no one.**
+**Your data, your keys, your sovereignty.**
