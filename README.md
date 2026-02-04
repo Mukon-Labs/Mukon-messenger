@@ -25,7 +25,7 @@ Mukon Messenger is a **truly private messaging app** where your wallet is your i
 - **Encrypted group chats** (NaCl secretbox with on-chain key backup)
 - **On-chain encrypted key recovery** - Unique feature! Your group keys are backed up encrypted on-chain, so clearing app data doesn't lock you out
 - **ZK Compression integration** - Light Protocol integration for reduced storage costs (foundation implemented)
-- **Contact lists encrypted with Arcium MPC** (implemented, testing in progress)
+- **Contact lists encrypted with Arcium MPC v0.7.0** (3 circuits live on devnet, testing in progress)
 - **Social graph privacy** - No one can see who you're talking to
 - **Wallet-based identity** - Your Solana wallet is your account
 
@@ -140,10 +140,13 @@ adb install mukon-debug.apk
 
 ### 🔐 Privacy Features
 
-- **Arcium MPC Integration** - Contact lists encrypted with multi-party computation
-  - Status: Implemented, testing in progress
-  - Circuits built: `is_accepted_contact`, `count_accepted`, `add_two_numbers`
-  - Allows private relationship verification without revealing contacts
+- **Arcium MPC Integration (v0.7.0)** - Relationship status verified privately via multi-party computation
+  - Status: 3 circuits live on devnet, E2E testing in progress
+  - Circuits: `is_mutual_contact` (30K gates), `count_accepted` (507M ACUs), `add_two_numbers` (473M ACUs)
+  - Allows private relationship verification without revealing contact graph
+- **Per-Relationship PDAs** - Each contact pair has its own on-chain account (82 bytes)
+  - Canonical ordering: same PDA regardless of who initiates
+  - Replaces monolithic contact list (WalletDescriptor) for better privacy + efficiency
 - **No Metadata Leakage** - Relay servers only see encrypted blobs
 - **Wallet-based Auth** - No passwords, no email, no phone number
 - **On-chain Encrypted Storage** - Relationships stored on Solana, encrypted
@@ -158,22 +161,27 @@ adb install mukon-debug.apk
 
 **Accounts:**
 - `UserProfile` - Display name, avatar, encryption public key
-- `WalletDescriptor` - Contact list (peers with states: Invited, Requested, Accepted, Rejected, Blocked)
+- `Relationship` - Per-pair PDA for DM contacts (canonical ordering, status per side)
+  - Seeds: `["relationship", min(a,b), max(a,b), version]` — 82 bytes
+  - Status values: 0=Empty, 1=Invited, 2=Requested, 3=Accepted, 4=Rejected, 5=Blocked
+- `Conversation` - Chat metadata (participants, created_at)
 - `Group` - Group metadata, members list, token gate, encryption public key
 - `GroupInvite` - Pending group invitations
-- `GroupKeyShare` - **NEW!** Encrypted group key backup per member (for recovery)
+- `GroupKeyShare` - Encrypted group key backup per member (for recovery)
+- `WalletDescriptor` - **LEGACY** — use `close_wallet_descriptor` to reclaim rent
 
 **Instructions:**
 ```rust
-// DM Instructions (9)
-register()          // Create profile + wallet descriptor
-update_profile()    // Update name/avatar/encryption key
-invite()            // Send contact invitation
-accept()            // Accept invitation
-reject()            // Reject/delete contact
-block()             // Block contact (prevents re-invite)
-unblock()           // Unblock contact
-close_profile()     // Close profile (devnet only)
+// DM Instructions (10)
+register()                  // Create profile
+update_profile()            // Update name/avatar/encryption key
+invite()                    // Create Relationship PDA + Conversation PDA
+accept()                    // Set both statuses to Accepted
+reject()                    // Set both statuses to Rejected
+block()                     // Set both statuses to Blocked
+unblock()                   // Blocked → Rejected (allows re-invite)
+close_profile()             // Close profile (devnet only)
+close_wallet_descriptor()   // Close legacy WalletDescriptor + recover rent
 
 // Group Instructions (10)
 create_group()          // Create new group
@@ -298,7 +306,7 @@ This is **impossible** in WhatsApp/Signal because they don't have blockchain. We
 
 ## Arcium MPC Integration
 
-**Status:** ✅ Implemented, testing in progress
+**Status:** ✅ Live on devnet (v0.7.0) — 3 computation definitions deployed
 
 ### What is Arcium?
 
@@ -306,17 +314,17 @@ Arcium is a Multi-Party Computation (MPC) network on Solana that allows computat
 
 ### What We Use It For
 
-**Contact List Privacy:**
+**Contact Relationship Privacy:**
 
 Without Arcium:
-- Anyone can query your `WalletDescriptor` account
-- See all your contacts (invited, accepted, blocked)
-- Map social graphs by analyzing all descriptors
+- Anyone can query `Relationship` PDAs on-chain
+- See contact statuses (invited, accepted, blocked)
+- Map social graphs by analyzing all relationships
 - **Your social network is public**
 
 With Arcium:
-- Contact lists stored encrypted on-chain
-- Can prove "Alice is my contact" without revealing others (zero-knowledge proof)
+- Relationship status verified privately via MPC
+- Can prove "Alice and I are mutual contacts" without revealing status to others
 - MPC nodes compute on encrypted data, return encrypted result
 - **Your social network is private**
 
@@ -334,25 +342,24 @@ With Arcium:
 
 ### Implementation Details
 
-**Circuits Built:**
-1. `is_accepted_contact.arcis` (13.9B ACUs) - Check if pubkey is accepted contact
-2. `count_accepted.arcis` (2.2B ACUs) - Count accepted contacts privately
-3. `add_two_numbers.arcis` (485M ACUs) - Demo/testing circuit
+**Circuits (Arcium v0.7.0):**
+
+| Circuit | ACUs | Status | Description |
+|---------|------|--------|-------------|
+| `is_mutual_contact` | ~30K gates | **LIVE** | Check if both sides of a Relationship have Accepted status |
+| `count_accepted` | 507M | **LIVE** | Count accepted contacts privately |
+| `add_two_numbers` | 473M | **LIVE** | Demo/testing circuit |
+
+**Architecture Pivot (Feb 4):**
+
+The original `is_accepted_contact` circuit was blocked at 1.17B ACUs (Arcium limit ~700-800M) because comparing encrypted 32-byte pubkeys is too expensive. The per-relationship PDA model solves this by comparing two `u8` status values instead — reducing cost from 1.17B ACUs to ~30K gates.
 
 **Program Integration:**
-- 7 Arcium instructions (3 init_comp_def, 2 queue, 2 callback)
-- Client encryption utilities (`arcium.ts`)
-- Transaction builders for Arcium instructions
-- Event listeners for MPC results
+- 8 Arcium instructions (3 init_comp_def, 2 queue, 2 callback, 1 check_mutual_contact)
+- Deployed with `arcium deploy --cluster-offset 456`
+- MXE Account: `5EJeKvZL6dPFcNuVVUWctDzZLU16pJA4sucg3ysPXJdr`
 
-**Current Status:**
-- ✅ Circuits compiled with Arcium v0.6.2
-- ✅ Program has Arcium macros (`#[arcium_program]`)
-- ⏳ Temporarily disabled (Arcium v0.6.6 breaking changes on Jan 31)
-- ⏳ Re-enabling after ecosystem stabilizes
-- ⏳ Full integration testing planned
-
-See `.dev/ARCIUM_DISABLED_CODE.md` for detailed implementation.
+See `.dev/ARCIUM_INTEGRATION.md` for detailed implementation.
 
 ---
 
@@ -504,7 +511,7 @@ Despite being disabled on devnet, the Light Protocol integration demonstrates:
 - Solana (devnet)
 - Anchor Framework 0.32.1
 - Light Protocol SDK 0.17 with V2 (ZK Compression - production-ready, devnet-disabled)
-- Arcium v0.6.2 (MPC circuits)
+- Arcium v0.7.0 (MPC circuits — 3 live on devnet)
 
 **Backend:**
 - Node.js + Express
@@ -602,7 +609,7 @@ anchor test
 - No account versioning - Breaking changes force re-registration
 - No migration path - Need version field + lazy migration
 - No audit - Professional audit required before mainnet
-- Arcium testing - MPC integration needs extensive testing
+- Arcium testing - MPC v0.7.0 circuits live on devnet, E2E testing in progress
 
 **Planned Improvements:**
 - Message persistence (Fly.io Postgres)
@@ -637,16 +644,22 @@ See `app/BUILD.md` for build decision tree.
 ### Program Deployment
 
 ```bash
-# 1. Build
+# 1. Build circuits + program
+arcium build
 anchor build
 
-# 2. Deploy to devnet
-anchor deploy --provider.cluster devnet
+# 2. Deploy to devnet (upgrade only)
+arcium deploy --skip-init --cluster-offset 456 --recovery-set-size 4 \
+  --keypair-path ~/.config/solana/id.json \
+  --rpc-url https://api.devnet.solana.com
 
-# 3. Update discriminators
+# 3. Init comp defs (one-time per circuit)
+npx ts-node --transpile-only scripts/init-comp-defs.ts
+
+# 4. Update discriminators
 node scripts/update-discriminators.js
 
-# 4. Rebuild client
+# 5. Rebuild client
 cd app && npm run build
 ```
 
@@ -657,7 +670,7 @@ Discriminators are 8-byte instruction identifiers that must match between client
 ```
 mukon-messenger/
 ├── programs/mukon-messenger/
-│   └── src/lib.rs           # Anchor program (1,452 lines)
+│   └── src/lib.rs           # Anchor program (Arcium v0.7.0 + Light Protocol)
 ├── app/                      # React Native client
 │   ├── src/
 │   │   ├── contexts/
@@ -668,20 +681,22 @@ mukon-messenger/
 │   │   ├── utils/
 │   │   │   ├── transactions.ts  # Manual tx builders
 │   │   │   ├── encryption.ts    # NaCl utilities
-│   │   │   ├── domains.ts       # .sol/.skr resolution
-│   │   │   └── arcium.ts        # Arcium integration
+│   │   │   └── domains.ts       # .sol/.skr resolution
 │   │   └── config.ts        # Backend URL config
 │   └── build-apk.sh         # Build script
 ├── backend/                  # WebSocket relay
 │   └── src/index.js         # Socket.IO server (650+ lines)
-├── encrypted-ixs/            # Arcium circuits
-│   └── src/lib.rs           # MPC circuits (80 lines)
+├── encrypted-ixs/            # Arcium MPC circuit definitions
+│   └── src/lib.rs           # 3 circuits (is_mutual_contact, count_accepted, add_two_numbers)
+├── build/                    # Compiled Arcium circuits (.arcis, .weight, .hash)
 ├── scripts/
-│   └── update-discriminators.js
+│   ├── update-discriminators.js
+│   └── init-comp-defs.ts    # Initialize Arcium computation definitions
 ├── .dev/                     # Development docs
-│   ├── ARCIUM_DISABLED_CODE.md
+│   ├── ARCIUM_INTEGRATION.md
+│   ├── LIGHT_PROTOCOL_INTEGRATION.md
 │   ├── CHANGELOG.md
-│   └── fly.md
+│   └── CLAUDE.md
 └── README.md                 # This file
 ```
 

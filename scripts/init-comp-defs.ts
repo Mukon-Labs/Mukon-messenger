@@ -30,14 +30,15 @@ const LUT_PROGRAM_ID = new PublicKey(
 );
 
 const CIRCUITS = [
-  "is_accepted_contact",
+  "is_mutual_contact",
   "count_accepted",
   "add_two_numbers",
 ] as const;
 
-// Discriminators from IDL
+// Discriminators from IDL (UPDATE AFTER arcium build via scripts/update-discriminators.js)
+// These are for the init_<circuit>_comp_def instructions, NOT the circuits themselves
 const DISCRIMINATORS: Record<string, Buffer> = {
-  is_accepted_contact: Buffer.from([0xb5, 0x36, 0x32, 0xc8, 0x6a, 0xb0, 0x5e, 0x74]),
+  is_mutual_contact: Buffer.from([0x0b, 0x2e, 0xb2, 0xaa, 0xc0, 0x96, 0x1b, 0xd0]), // 0b2eb2aac0961bd0
   count_accepted: Buffer.from([0x11, 0xee, 0xc7, 0x80, 0x8e, 0x16, 0x75, 0x5e]),
   add_two_numbers: Buffer.from([0x43, 0xee, 0x95, 0x82, 0xa3, 0xa4, 0x21, 0xf1]),
 };

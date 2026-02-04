@@ -8,6 +8,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   getUserProfilePDA,
   getWalletDescriptorPDA,
+  getRelationshipPDA,
   getGroupPDA,
   getGroupInvitePDA,
   getGroupKeySharePDA,
@@ -29,7 +30,6 @@ import {
   createCloseGroupInstruction,
   createStoreGroupKeyInstruction,
   createCloseGroupKeyInstruction,
-  createCheckIsContactInstruction,
   // ZK Compression instructions
   createStoreCompressedGroupKeyInstruction,
   createCloseCompressedGroupKeyInstruction,
@@ -37,10 +37,12 @@ import {
   createAcceptGroupInviteCompressedInstruction,
   createRejectGroupInviteCompressedInstruction,
   buildTransaction,
-  deserializeWalletDescriptor,
+  deserializeRelationship,
+  getContactFromRelationship,
   deserializeGroup,
   deserializeGroupInvite,
   deserializeGroupKeyShare,
+  PROGRAM_ID,
   type Group,
   type GroupInvite,
   type GroupKeyShare,
@@ -1301,63 +1303,75 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     if (!wallet?.publicKey) return;
 
     try {
-      const descriptorPDA = getWalletDescriptorPDA(wallet.publicKey);
-      const accountInfo = await connection.getAccountInfo(descriptorPDA);
+      const myKey = wallet.publicKey;
 
-      if (!accountInfo) {
-        setContacts([]);
-        return;
-      }
+      // Find all Relationship PDAs where I'm user_a (offset 8) or user_b (offset 40)
+      const [asA, asB] = await Promise.all([
+        connection.getProgramAccounts(PROGRAM_ID, {
+          filters: [
+            { dataSize: 82 },
+            { memcmp: { offset: 8, bytes: myKey.toBase58() } },
+          ],
+        }),
+        connection.getProgramAccounts(PROGRAM_ID, {
+          filters: [
+            { dataSize: 82 },
+            { memcmp: { offset: 40, bytes: myKey.toBase58() } },
+          ],
+        }),
+      ]);
 
-      const descriptor = deserializeWalletDescriptor(accountInfo.data);
-      console.log('Found', descriptor.peers.length, 'peers');
+      const allRelationships = [...asA, ...asB];
+      console.log('Found', allRelationships.length, 'relationships');
 
       const contactsWithKeys = await Promise.all(
-        descriptor.peers
-          // Load ALL peers (not just Accepted) so we can check state in AddContactScreen
-          .map(async (peer) => {
-            const peerProfilePDA = getUserProfilePDA(peer.pubkey);
-            const peerAccountInfo = await connection.getAccountInfo(peerProfilePDA);
+        allRelationships.map(async ({ account }) => {
+          const rel = deserializeRelationship(account.data);
+          const contact = getContactFromRelationship(rel, myKey);
+          if (!contact) return null;
 
-            let displayName: string | undefined;
-            let avatarUrl: string | undefined;
-            let encryptionPublicKey: Uint8Array | undefined;
+          const peerProfilePDA = getUserProfilePDA(contact.peerPubkey);
+          const peerAccountInfo = await connection.getAccountInfo(peerProfilePDA);
 
-            if (peerAccountInfo) {
-              const data = peerAccountInfo.data;
-              let offset = 8 + 32;
-              const displayNameLength = data.readUInt32LE(offset);
-              offset += 4;
-              displayName = data.slice(offset, offset + displayNameLength).toString('utf-8');
-              offset += displayNameLength;
-              // Read avatar_type (1 byte enum) - CRITICAL FIX
-              const avatarType = data.readUInt8(offset);
-              offset += 1;
-              const avatarUrlLength = data.readUInt32LE(offset);
-              offset += 4;
-              avatarUrl = data.slice(offset, offset + avatarUrlLength).toString('utf-8');
-              offset += avatarUrlLength;
-              encryptionPublicKey = data.slice(offset, offset + 32);
+          let displayName: string | undefined;
+          let avatarUrl: string | undefined;
+          let encryptionPublicKey: Uint8Array | undefined;
 
-              if (peer.status === 'Accepted') {
-                console.log(
-                  `Loaded encryption key for ${peer.pubkey.toBase58().slice(0, 8)}...: ${Buffer.from(encryptionPublicKey).toString('hex').slice(0, 16)}...`
-                );
-              }
+          if (peerAccountInfo) {
+            const data = peerAccountInfo.data;
+            let offset = 8 + 32;
+            const displayNameLength = data.readUInt32LE(offset);
+            offset += 4;
+            displayName = data.slice(offset, offset + displayNameLength).toString('utf-8');
+            offset += displayNameLength;
+            const avatarType = data.readUInt8(offset);
+            offset += 1;
+            const avatarUrlLength = data.readUInt32LE(offset);
+            offset += 4;
+            avatarUrl = data.slice(offset, offset + avatarUrlLength).toString('utf-8');
+            offset += avatarUrlLength;
+            encryptionPublicKey = data.slice(offset, offset + 32);
+
+            if (contact.myStatus === 'Accepted') {
+              console.log(
+                `Loaded encryption key for ${contact.peerPubkey.toBase58().slice(0, 8)}...: ${Buffer.from(encryptionPublicKey).toString('hex').slice(0, 16)}...`
+              );
             }
+          }
 
-            return {
-              publicKey: peer.pubkey,
-              displayName,
-              avatarUrl,
-              encryptionPublicKey,
-              state: peer.status, // Map status to state field
-            };
-          })
+          return {
+            publicKey: contact.peerPubkey,
+            displayName,
+            avatarUrl,
+            encryptionPublicKey,
+            state: contact.myStatus,
+          };
+        })
       );
 
-      console.log('Loaded peers with encryption keys:', contactsWithKeys.filter(c => c.encryptionPublicKey).length);
-      setContacts(contactsWithKeys);
+      const validContacts = contactsWithKeys.filter((c): c is NonNullable<typeof c> => c !== null);
+      console.log('Loaded peers with encryption keys:', validContacts.filter(c => c.encryptionPublicKey).length);
+      setContacts(validContacts);
     } catch (error) {
       console.error('Failed to load contacts:', error);
     }

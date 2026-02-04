@@ -7,42 +7,36 @@ mod circuits {
     /// Maximum number of contacts (fixed-size for MPC compatibility)
     const MAX_CONTACTS: usize = 2;
 
-    /// Encrypted contact entry
+    /// Relationship status pair for MPC verification
+    #[derive(Debug, Clone, Copy)]
+    pub struct RelationshipStatus {
+        pub status_a: u8,
+        pub status_b: u8,
+    }
+
+    /// Check if both sides of a relationship have Accepted status (3)
+    /// Used to verify mutual contact status without revealing individual states
+    #[instruction]
+    pub fn is_mutual_contact(
+        status: Enc<Shared, RelationshipStatus>,
+    ) -> Enc<Shared, bool> {
+        let s = status.to_arcis();
+        let result = s.status_a == 3 && s.status_b == 3; // 3 = Accepted
+        status.owner.from_arcis(result)
+    }
+
+    /// Encrypted contact entry (used by count_accepted)
     #[derive(Debug, Clone, Copy)]
     pub struct ContactEntry {
         pub pubkey: [u8; 32],
         pub status: u8, // 0=empty, 1=pending, 2=accepted, 3=rejected, 4=blocked
     }
 
-    /// Encrypted contact list with fixed size
+    /// Encrypted contact list with fixed size (used by count_accepted)
     #[derive(Debug, Clone, Copy)]
     pub struct ContactList {
         pub contacts: [ContactEntry; MAX_CONTACTS],
         pub count: u32,
-    }
-
-    /// Check if a wallet is in the contact list with accepted status
-    #[instruction]
-    pub fn is_accepted_contact(
-        list: Enc<Shared, ContactList>,
-        query_pubkey: Enc<Shared, [u8; 32]>,
-    ) -> Enc<Shared, bool> {
-        let contacts = list.to_arcis();
-        let pubkey = query_pubkey.to_arcis();
-
-        let mut is_contact = false;
-
-        // Scan through all contacts to find accepted match
-        for i in 0..MAX_CONTACTS {
-            if i < contacts.count as usize {
-                let contact = contacts.contacts[i];
-                if contact.pubkey == pubkey && contact.status == 2 {
-                    is_contact = true;
-                }
-            }
-        }
-
-        list.owner.from_arcis(is_contact)
     }
 
     /// Count accepted contacts

@@ -25,7 +25,7 @@ declare_id!("54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy");
 pub const LIGHT_CPI_SIGNER: CpiSigner =
     light_sdk::derive_light_cpi_signer!("54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy");
 
-const COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT: u32 = comp_def_offset("is_accepted_contact");
+const COMP_DEF_OFFSET_IS_MUTUAL_CONTACT: u32 = comp_def_offset("is_mutual_contact");
 const COMP_DEF_OFFSET_COUNT_ACCEPTED: u32 = comp_def_offset("count_accepted");
 const COMP_DEF_OFFSET_ADD_TWO_NUMBERS: u32 = comp_def_offset("add_two_numbers");
 
@@ -88,26 +88,28 @@ fn get_chat_hash(a: Pubkey, b: Pubkey) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+// Relationship status constants
+const STATUS_EMPTY: u8 = 0;
+const STATUS_INVITED: u8 = 1;
+const STATUS_REQUESTED: u8 = 2;
+const STATUS_ACCEPTED: u8 = 3;
+const STATUS_REJECTED: u8 = 4;
+const STATUS_BLOCKED: u8 = 5;
+
+/// Returns (min, max) canonical ordering of two pubkeys
+fn canonical_order(a: Pubkey, b: Pubkey) -> (Pubkey, Pubkey) {
+    if a < b { (a, b) } else { (b, a) }
+}
+
 #[arcium_program]
 pub mod mukon_messenger {
     use super::*;
 
     pub fn register(ctx: Context<Register>, display_name: String, avatar_data: String, encryption_public_key: [u8; 32]) -> Result<()> {
-        let wallet_descriptor = &mut ctx.accounts.wallet_descriptor;
         let user_profile = &mut ctx.accounts.user_profile;
         let payer = &ctx.accounts.payer;
 
         require!(display_name.len() <= 32, ErrorCode::DisplayNameTooLong);
-
-        // Only initialize peers if this is a new account (not created by an invite)
-        // If account was created by invite instruction, peers already has pending invitations
-        if wallet_descriptor.owner == Pubkey::default() {
-            wallet_descriptor.owner = payer.key();
-            wallet_descriptor.peers = vec![];
-        } else {
-            // Account exists (created by invite) - just update owner, preserve peers
-            wallet_descriptor.owner = payer.key();
-        }
 
         user_profile.owner = payer.key();
         user_profile.display_name = display_name.clone();
@@ -170,8 +172,19 @@ pub mod mukon_messenger {
             ErrorCode::InvalidHash
         );
 
-        // Verify WalletDescriptor PDA
-        let (expected_descriptor_pda, _) = Pubkey::find_program_address(
+        // Close UserProfile
+        let profile_lamports = ctx.accounts.user_profile.lamports();
+        **ctx.accounts.user_profile.lamports.borrow_mut() = 0;
+        **ctx.accounts.payer.lamports.borrow_mut() += profile_lamports;
+        ctx.accounts.user_profile.try_borrow_mut_data()?.fill(0);
+
+        msg!("Profile closed: {:?}", ctx.accounts.payer.key());
+        Ok(())
+    }
+
+    /// Close a legacy WalletDescriptor to reclaim rent (migration helper)
+    pub fn close_wallet_descriptor(ctx: Context<CloseWalletDescriptor>) -> Result<()> {
+        let (expected_pda, _) = Pubkey::find_program_address(
             &[
                 b"wallet_descriptor",
                 ctx.accounts.payer.key().as_ref(),
@@ -182,91 +195,47 @@ pub mod mukon_messenger {
 
         require_keys_eq!(
             ctx.accounts.wallet_descriptor.key(),
-            expected_descriptor_pda,
+            expected_pda,
             ErrorCode::InvalidHash
         );
 
-        // Close UserProfile
-        let profile_lamports = ctx.accounts.user_profile.lamports();
-        **ctx.accounts.user_profile.lamports.borrow_mut() = 0;
-        **ctx.accounts.payer.lamports.borrow_mut() += profile_lamports;
-        ctx.accounts.user_profile.try_borrow_mut_data()?.fill(0);
-
-        // Close WalletDescriptor
         let descriptor_lamports = ctx.accounts.wallet_descriptor.lamports();
         **ctx.accounts.wallet_descriptor.lamports.borrow_mut() = 0;
         **ctx.accounts.payer.lamports.borrow_mut() += descriptor_lamports;
         ctx.accounts.wallet_descriptor.try_borrow_mut_data()?.fill(0);
 
-        msg!("Profile and descriptor closed: {:?}", ctx.accounts.payer.key());
+        msg!("WalletDescriptor closed: {:?}", ctx.accounts.payer.key());
         Ok(())
     }
 
     pub fn invite(ctx: Context<Invite>, _hash: [u8; 32]) -> Result<()> {
         let inviter = &ctx.accounts.payer;
         let invitee = &ctx.accounts.invitee;
-        let inviter_descriptor = &mut ctx.accounts.payer_descriptor;
-        let invitee_descriptor = &mut ctx.accounts.invitee_descriptor;
-
-        // Initialize invitee_descriptor if it's a new account
-        if invitee_descriptor.owner == Pubkey::default() {
-            invitee_descriptor.owner = invitee.key();
-            invitee_descriptor.peers = vec![];
-        }
+        let relationship = &mut ctx.accounts.relationship;
 
         let hash = get_chat_hash(inviter.key(), invitee.key());
         require!(hash == _hash, ErrorCode::InvalidHash);
 
-        // Check inviter's side: allow re-invite if Rejected, block if Blocked
-        let inviter_peer = inviter_descriptor.peers.iter_mut()
-            .find(|p| p.wallet == invitee.key());
+        // Validate canonical ordering
+        let user_a = ctx.accounts.user_a.key();
+        let user_b = ctx.accounts.user_b.key();
+        require!(user_a < user_b, ErrorCode::InvalidHash);
 
-        match inviter_peer {
-            Some(peer) if peer.state == PeerState::Rejected => {
-                // Re-inviting rejected contact - update state
-                peer.state = PeerState::Invited;
-            },
-            Some(peer) if peer.state == PeerState::Blocked => {
-                // Cannot invite blocked user
-                return Err(ErrorCode::AlreadyInvited.into());
-            },
-            Some(_) => {
-                // Peer exists with non-Rejected/non-Blocked status
-                return Err(ErrorCode::AlreadyInvited.into());
-            },
-            None => {
-                // New peer - add to list
-                inviter_descriptor.peers.push(Peer {
-                    wallet: invitee.key(),
-                    state: PeerState::Invited,
-                });
-            }
-        }
+        // Validate that user_a and user_b match payer and invitee
+        let (expected_a, expected_b) = canonical_order(inviter.key(), invitee.key());
+        require!(user_a == expected_a && user_b == expected_b, ErrorCode::InvalidHash);
 
-        // Check invitee's side: allow re-invite if Rejected, block if Blocked
-        let invitee_peer = invitee_descriptor.peers.iter_mut()
-            .find(|p| p.wallet == inviter.key());
+        relationship.user_a = user_a;
+        relationship.user_b = user_b;
+        relationship.created_at = Clock::get()?.unix_timestamp;
 
-        match invitee_peer {
-            Some(peer) if peer.state == PeerState::Rejected => {
-                // Re-inviting rejected contact - update state
-                peer.state = PeerState::Requested;
-            },
-            Some(peer) if peer.state == PeerState::Blocked => {
-                // Cannot invite blocked user
-                return Err(ErrorCode::AlreadyInvited.into());
-            },
-            Some(_) => {
-                // Peer exists with non-Rejected/non-Blocked status
-                return Err(ErrorCode::AlreadyInvited.into());
-            },
-            None => {
-                // New peer - add to list
-                invitee_descriptor.peers.push(Peer {
-                    wallet: inviter.key(),
-                    state: PeerState::Requested,
-                });
-            }
+        // Set status based on canonical ordering
+        if inviter.key() == user_a {
+            relationship.status_a = STATUS_INVITED;
+            relationship.status_b = STATUS_REQUESTED;
+        } else {
+            relationship.status_a = STATUS_REQUESTED;
+            relationship.status_b = STATUS_INVITED;
         }
 
         let conversation = &mut ctx.accounts.conversation;
@@ -282,32 +251,21 @@ pub mod mukon_messenger {
     pub fn accept(ctx: Context<Accept>) -> Result<()> {
         let me = &ctx.accounts.payer;
         let peer = &ctx.accounts.peer;
-        let me_descriptor = &mut ctx.accounts.payer_descriptor;
-        let peer_descriptor = &mut ctx.accounts.peer_descriptor;
+        let relationship = &mut ctx.accounts.relationship;
 
-        require!(
-            me_descriptor.peers.iter()
-                .any(|p| p.wallet == peer.key() && p.state == PeerState::Requested),
-            ErrorCode::NotRequested
-        );
-        require!(
-            peer_descriptor.peers.iter()
-                .any(|p| p.wallet == me.key() && p.state == PeerState::Invited),
-            ErrorCode::NotInvited
-        );
+        let (user_a, _) = canonical_order(me.key(), peer.key());
 
-        for p in me_descriptor.peers.iter_mut() {
-            if p.wallet == peer.key() {
-                p.state = PeerState::Accepted;
-                break;
-            }
+        // Verify caller has Requested status and peer has Invited status
+        if me.key() == user_a {
+            require!(relationship.status_a == STATUS_REQUESTED, ErrorCode::NotRequested);
+            require!(relationship.status_b == STATUS_INVITED, ErrorCode::NotInvited);
+        } else {
+            require!(relationship.status_b == STATUS_REQUESTED, ErrorCode::NotRequested);
+            require!(relationship.status_a == STATUS_INVITED, ErrorCode::NotInvited);
         }
-        for p in peer_descriptor.peers.iter_mut() {
-            if p.wallet == me.key() {
-                p.state = PeerState::Accepted;
-                break;
-            }
-        }
+
+        relationship.status_a = STATUS_ACCEPTED;
+        relationship.status_b = STATUS_ACCEPTED;
 
         msg!("Accept: accepter={:?}, inviter={:?}, chat={:?}",
              me.key(), peer.key(), get_chat_hash(me.key(), peer.key()));
@@ -318,32 +276,21 @@ pub mod mukon_messenger {
     pub fn reject(ctx: Context<Reject>) -> Result<()> {
         let me = &ctx.accounts.payer;
         let peer = &ctx.accounts.peer;
-        let me_descriptor = &mut ctx.accounts.payer_descriptor;
-        let peer_descriptor = &mut ctx.accounts.peer_descriptor;
+        let relationship = &mut ctx.accounts.relationship;
 
-        // Allow rejecting/deleting ANY contact that exists in YOUR descriptor
-        // Don't check peer's state - allow cleanup regardless of their side (handles corrupted states)
+        let (user_a, _) = canonical_order(me.key(), peer.key());
+
+        // Allow rejecting any non-blocked relationship
+        let my_status = if me.key() == user_a { relationship.status_a } else { relationship.status_b };
         require!(
-            me_descriptor.peers.iter()
-                .any(|p| p.wallet == peer.key() &&
-                     (p.state == PeerState::Requested || p.state == PeerState::Invited || p.state == PeerState::Accepted || p.state == PeerState::Rejected)),
+            my_status == STATUS_REQUESTED || my_status == STATUS_INVITED || my_status == STATUS_ACCEPTED || my_status == STATUS_REJECTED,
             ErrorCode::NotRequested
         );
 
-        for p in me_descriptor.peers.iter_mut() {
-            if p.wallet == peer.key() {
-                p.state = PeerState::Rejected;
-                break;
-            }
-        }
-        for p in peer_descriptor.peers.iter_mut() {
-            if p.wallet == me.key() {
-                p.state = PeerState::Rejected;
-                break;
-            }
-        }
+        relationship.status_a = STATUS_REJECTED;
+        relationship.status_b = STATUS_REJECTED;
 
-        msg!("Reject: rejecter={:?}, inviter={:?}",
+        msg!("Reject: rejecter={:?}, peer={:?}",
              me.key(), peer.key());
 
         Ok(())
@@ -352,34 +299,15 @@ pub mod mukon_messenger {
     pub fn block(ctx: Context<Block>) -> Result<()> {
         let me = &ctx.accounts.payer;
         let peer = &ctx.accounts.peer;
-        let me_descriptor = &mut ctx.accounts.payer_descriptor;
-        let peer_descriptor = &mut ctx.accounts.peer_descriptor;
+        let relationship = &mut ctx.accounts.relationship;
 
-        // Can block anyone you have a relationship with (any state except doesn't exist)
-        require!(
-            me_descriptor.peers.iter()
-                .any(|p| p.wallet == peer.key()),
-            ErrorCode::NotInvited
-        );
-        require!(
-            peer_descriptor.peers.iter()
-                .any(|p| p.wallet == me.key()),
-            ErrorCode::NotInvited
-        );
+        // Relationship must exist (any non-empty status)
+        let (user_a, _) = canonical_order(me.key(), peer.key());
+        let my_status = if me.key() == user_a { relationship.status_a } else { relationship.status_b };
+        require!(my_status != STATUS_EMPTY, ErrorCode::NotInvited);
 
-        // Set both sides to Blocked (symmetric)
-        for p in me_descriptor.peers.iter_mut() {
-            if p.wallet == peer.key() {
-                p.state = PeerState::Blocked;
-                break;
-            }
-        }
-        for p in peer_descriptor.peers.iter_mut() {
-            if p.wallet == me.key() {
-                p.state = PeerState::Blocked;
-                break;
-            }
-        }
+        relationship.status_a = STATUS_BLOCKED;
+        relationship.status_b = STATUS_BLOCKED;
 
         msg!("Block: blocker={:?}, blocked={:?}",
              me.key(), peer.key());
@@ -390,34 +318,17 @@ pub mod mukon_messenger {
     pub fn unblock(ctx: Context<Unblock>) -> Result<()> {
         let me = &ctx.accounts.payer;
         let peer = &ctx.accounts.peer;
-        let me_descriptor = &mut ctx.accounts.payer_descriptor;
-        let peer_descriptor = &mut ctx.accounts.peer_descriptor;
+        let relationship = &mut ctx.accounts.relationship;
 
         // Can only unblock if currently blocked
         require!(
-            me_descriptor.peers.iter()
-                .any(|p| p.wallet == peer.key() && p.state == PeerState::Blocked),
-            ErrorCode::NotInvited
-        );
-        require!(
-            peer_descriptor.peers.iter()
-                .any(|p| p.wallet == me.key() && p.state == PeerState::Blocked),
+            relationship.status_a == STATUS_BLOCKED && relationship.status_b == STATUS_BLOCKED,
             ErrorCode::NotInvited
         );
 
         // Change Blocked → Rejected (allows re-invite after unblock)
-        for p in me_descriptor.peers.iter_mut() {
-            if p.wallet == peer.key() {
-                p.state = PeerState::Rejected;
-                break;
-            }
-        }
-        for p in peer_descriptor.peers.iter_mut() {
-            if p.wallet == me.key() {
-                p.state = PeerState::Rejected;
-                break;
-            }
-        }
+        relationship.status_a = STATUS_REJECTED;
+        relationship.status_b = STATUS_REJECTED;
 
         msg!("Unblock: unblocker={:?}, unblocked={:?}",
              me.key(), peer.key());
@@ -1038,17 +949,17 @@ pub mod mukon_messenger {
 
     // ========== ARCIUM MPC INSTRUCTIONS ==========
 
-    /// Initialize computation definition for is_accepted_contact circuit
-    pub fn init_is_accepted_contact_comp_def(ctx: Context<InitIsAcceptedContactCompDef>) -> Result<()> {
+    /// Initialize computation definition for is_mutual_contact circuit
+    pub fn init_is_mutual_contact_comp_def(ctx: Context<InitIsMutualContactCompDef>) -> Result<()> {
         init_comp_def(
             ctx.accounts,
             Some(CircuitSource::OffChain(OffChainCircuitSource {
-                source: "https://mukon-circuits.fly.dev/is_accepted_contact.arcis".to_string(),
-                hash: circuit_hash!("is_accepted_contact"),
+                source: "https://mukon-circuits.fly.dev/is_mutual_contact.arcis".to_string(),
+                hash: circuit_hash!("is_mutual_contact"),
             })),
             None,
         )?;
-        msg!("Initialized comp def: is_accepted_contact");
+        msg!("Initialized comp def: is_mutual_contact");
         Ok(())
     }
 
@@ -1080,25 +991,20 @@ pub mod mukon_messenger {
         Ok(())
     }
 
-    /// Queue MPC computation to check if a contact is accepted
-    pub fn check_is_contact(
-        ctx: Context<CheckIsContact>,
+    /// Queue MPC computation to check if a relationship is mutually accepted
+    pub fn check_mutual_contact(
+        ctx: Context<CheckMutualContact>,
         computation_offset: u64,
-        contact_list_account: Pubkey,
-        contact_list_offset: u32,
-        contact_list_length: u32,
-        encrypted_query_pubkey: [u8; 32],
+        relationship_account: Pubkey,
+        relationship_offset: u32,
+        relationship_length: u32,
         pub_key: [u8; 32],
-        nonce_list: u128,
-        nonce_query: u128,
+        nonce: u128,
     ) -> Result<()> {
         let args = ArgBuilder::new()
             .x25519_pubkey(pub_key)
-            .plaintext_u128(nonce_list)
-            .account(contact_list_account, contact_list_offset, contact_list_length)
-            .x25519_pubkey(pub_key)
-            .plaintext_u128(nonce_query)
-            .encrypted_u8(encrypted_query_pubkey)
+            .plaintext_u128(nonce)
+            .account(relationship_account, relationship_offset, relationship_length)
             .build();
 
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
@@ -1107,7 +1013,7 @@ pub mod mukon_messenger {
             ctx.accounts,
             computation_offset,
             args,
-            vec![IsAcceptedContactCallback::callback_ix(
+            vec![IsMutualContactCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
                 &[],
@@ -1116,34 +1022,34 @@ pub mod mukon_messenger {
             0,
         )?;
 
-        msg!("Queued is_contact computation: offset={}", computation_offset);
+        msg!("Queued mutual_contact computation: offset={}", computation_offset);
         Ok(())
     }
 
-    /// Callback for is_accepted_contact computation
-    #[arcium_callback(encrypted_ix = "is_accepted_contact")]
-    pub fn is_accepted_contact_callback(
-        ctx: Context<IsAcceptedContactCallback>,
-        output: SignedComputationOutputs<IsAcceptedContactOutput>,
+    /// Callback for is_mutual_contact computation
+    #[arcium_callback(encrypted_ix = "is_mutual_contact")]
+    pub fn is_mutual_contact_callback(
+        ctx: Context<IsMutualContactCallback>,
+        output: SignedComputationOutputs<IsMutualContactOutput>,
     ) -> Result<()> {
         let result = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
         ) {
-            Ok(IsAcceptedContactOutput { field_0 }) => field_0,
+            Ok(IsMutualContactOutput { field_0 }) => field_0,
             Err(e) => {
                 msg!("MPC computation failed: {}", e);
                 return Err(ErrorCode::AbortedComputation.into());
             }
         };
 
-        emit!(ContactCheckResult {
+        emit!(MutualContactResult {
             ciphertext: result.ciphertexts[0],
             nonce: result.nonce,
             encryption_key: result.encryption_key,
         });
 
-        msg!("is_contact computation completed");
+        msg!("mutual_contact computation completed");
         Ok(())
     }
 
@@ -1218,6 +1124,7 @@ const CONVERSATION_VERSION: [u8; 1] = [1];
 const GROUP_VERSION: [u8; 1] = [1];
 const GROUP_INVITE_VERSION: [u8; 1] = [1];
 const GROUP_KEY_SHARE_VERSION: [u8; 1] = [1];
+const RELATIONSHIP_VERSION: [u8; 1] = [1];
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
 pub enum PeerState {
@@ -1302,6 +1209,18 @@ pub struct GroupKeyShare {
     pub nonce: [u8; 24],
 }
 
+/// Per-relationship PDA for DM contacts
+/// Seeds: ["relationship", min(a,b), max(a,b), RELATIONSHIP_VERSION]
+#[account]
+pub struct Relationship {
+    pub user_a: Pubkey,     // min(pubkey_a, pubkey_b) — canonical ordering
+    pub user_b: Pubkey,     // max(pubkey_a, pubkey_b)
+    pub status_a: u8,       // user_a's status (0=empty, 1=invited, 2=requested, 3=accepted, 4=rejected, 5=blocked)
+    pub status_b: u8,       // user_b's status
+    pub created_at: i64,
+}
+// Space: 8 + 32 + 32 + 1 + 1 + 8 = 82 bytes
+
 // ========== COMPRESSED ACCOUNT STRUCTURES (Light Protocol ZK Compression) ==========
 
 /// Compressed version of GroupKeyShare for ZK compression
@@ -1356,14 +1275,6 @@ pub struct CompressedGroupInvite {
 #[instruction(display_name: String, avatar_data: String, encryption_public_key: [u8; 32])]
 pub struct Register<'info> {
     #[account(
-        init_if_needed,
-        payer = payer,
-        space = 8 + 32 + 4 + 100 * (32 + 1),  // Same size as invite creates
-        seeds = [b"wallet_descriptor", payer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
-        bump
-    )]
-    pub wallet_descriptor: Account<'info, WalletDescriptor>,
-    #[account(
         init,
         payer = payer,
         space = 8 + 32 + (4 + 32) + 1 + (4 + 128) + 32,
@@ -1397,7 +1308,14 @@ pub struct CloseProfile<'info> {
     /// CHECK: Old account structure may not deserialize. Client must pass correct PDA.
     #[account(mut)]
     pub user_profile: UncheckedAccount<'info>,
-    /// CHECK: Old WalletDescriptor may not deserialize. Client must pass correct PDA.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct CloseWalletDescriptor<'info> {
+    /// CHECK: Legacy WalletDescriptor account. Client must pass correct PDA.
     #[account(mut)]
     pub wallet_descriptor: UncheckedAccount<'info>,
     #[account(mut)]
@@ -1412,23 +1330,18 @@ pub struct Invite<'info> {
     pub payer: Signer<'info>,
     /// CHECK: invitee is a public key
     pub invitee: AccountInfo<'info>,
+    /// CHECK: must be min(payer, invitee) — validated in instruction
+    pub user_a: AccountInfo<'info>,
+    /// CHECK: must be max(payer, invitee) — validated in instruction
+    pub user_b: AccountInfo<'info>,
     #[account(
-        mut,
-        seeds = [b"wallet_descriptor", payer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
-        bump,
-        realloc = 8 + 32 + 4 + (payer_descriptor.peers.len() + 1) * (32 + 1),
-        realloc::payer = payer,
-        realloc::zero = true
-    )]
-    pub payer_descriptor: Account<'info, WalletDescriptor>,
-    #[account(
-        init_if_needed,
+        init,
         payer = payer,
-        space = 8 + 32 + 4 + 100 * (32 + 1),
-        seeds = [b"wallet_descriptor", invitee.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
+        space = 82,  // 8 + 32 + 32 + 1 + 1 + 8
+        seeds = [b"relationship", user_a.key().as_ref(), user_b.key().as_ref(), RELATIONSHIP_VERSION.as_ref()],
         bump
     )]
-    pub invitee_descriptor: Account<'info, WalletDescriptor>,
+    pub relationship: Account<'info, Relationship>,
     #[account(
         init_if_needed,
         payer = payer,
@@ -1446,18 +1359,16 @@ pub struct Accept<'info> {
     pub payer: Signer<'info>,
     /// CHECK: peer is a public key
     pub peer: AccountInfo<'info>,
+    /// CHECK: must be min(payer, peer) — validated in instruction
+    pub user_a: AccountInfo<'info>,
+    /// CHECK: must be max(payer, peer) — validated in instruction
+    pub user_b: AccountInfo<'info>,
     #[account(
         mut,
-        seeds = [b"wallet_descriptor", payer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
+        seeds = [b"relationship", user_a.key().as_ref(), user_b.key().as_ref(), RELATIONSHIP_VERSION.as_ref()],
         bump
     )]
-    pub payer_descriptor: Account<'info, WalletDescriptor>,
-    #[account(
-        mut,
-        seeds = [b"wallet_descriptor", peer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
-        bump
-    )]
-    pub peer_descriptor: Account<'info, WalletDescriptor>,
+    pub relationship: Account<'info, Relationship>,
 }
 
 #[derive(Accounts)]
@@ -1466,18 +1377,16 @@ pub struct Reject<'info> {
     pub payer: Signer<'info>,
     /// CHECK: peer is a public key
     pub peer: AccountInfo<'info>,
+    /// CHECK: must be min(payer, peer) — validated in instruction
+    pub user_a: AccountInfo<'info>,
+    /// CHECK: must be max(payer, peer) — validated in instruction
+    pub user_b: AccountInfo<'info>,
     #[account(
         mut,
-        seeds = [b"wallet_descriptor", payer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
+        seeds = [b"relationship", user_a.key().as_ref(), user_b.key().as_ref(), RELATIONSHIP_VERSION.as_ref()],
         bump
     )]
-    pub payer_descriptor: Account<'info, WalletDescriptor>,
-    #[account(
-        mut,
-        seeds = [b"wallet_descriptor", peer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
-        bump
-    )]
-    pub peer_descriptor: Account<'info, WalletDescriptor>,
+    pub relationship: Account<'info, Relationship>,
 }
 
 #[derive(Accounts)]
@@ -1486,18 +1395,16 @@ pub struct Block<'info> {
     pub payer: Signer<'info>,
     /// CHECK: peer is a public key
     pub peer: AccountInfo<'info>,
+    /// CHECK: must be min(payer, peer) — validated in instruction
+    pub user_a: AccountInfo<'info>,
+    /// CHECK: must be max(payer, peer) — validated in instruction
+    pub user_b: AccountInfo<'info>,
     #[account(
         mut,
-        seeds = [b"wallet_descriptor", payer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
+        seeds = [b"relationship", user_a.key().as_ref(), user_b.key().as_ref(), RELATIONSHIP_VERSION.as_ref()],
         bump
     )]
-    pub payer_descriptor: Account<'info, WalletDescriptor>,
-    #[account(
-        mut,
-        seeds = [b"wallet_descriptor", peer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
-        bump
-    )]
-    pub peer_descriptor: Account<'info, WalletDescriptor>,
+    pub relationship: Account<'info, Relationship>,
 }
 
 #[derive(Accounts)]
@@ -1506,18 +1413,16 @@ pub struct Unblock<'info> {
     pub payer: Signer<'info>,
     /// CHECK: peer is a public key
     pub peer: AccountInfo<'info>,
+    /// CHECK: must be min(payer, peer) — validated in instruction
+    pub user_a: AccountInfo<'info>,
+    /// CHECK: must be max(payer, peer) — validated in instruction
+    pub user_b: AccountInfo<'info>,
     #[account(
         mut,
-        seeds = [b"wallet_descriptor", payer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
+        seeds = [b"relationship", user_a.key().as_ref(), user_b.key().as_ref(), RELATIONSHIP_VERSION.as_ref()],
         bump
     )]
-    pub payer_descriptor: Account<'info, WalletDescriptor>,
-    #[account(
-        mut,
-        seeds = [b"wallet_descriptor", peer.key().as_ref(), WALLET_DESCRIPTOR_VERSION.as_ref()],
-        bump
-    )]
-    pub peer_descriptor: Account<'info, WalletDescriptor>,
+    pub relationship: Account<'info, Relationship>,
 }
 
 // ========== GROUP CONTEXT STRUCTURES ==========
@@ -1764,10 +1669,10 @@ pub struct RejectGroupInviteCompressed<'info> {
 
 // ========== ARCIUM MPC CONTEXT STRUCTURES ==========
 
-/// Context for initializing is_accepted_contact computation definition
-#[init_computation_definition_accounts("is_accepted_contact", payer)]
+/// Context for initializing is_mutual_contact computation definition
+#[init_computation_definition_accounts("is_mutual_contact", payer)]
 #[derive(Accounts)]
-pub struct InitIsAcceptedContactCompDef<'info> {
+pub struct InitIsMutualContactCompDef<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())]
@@ -1827,11 +1732,11 @@ pub struct InitAddTwoNumbersCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Context for queueing is_accepted_contact computation
-#[queue_computation_accounts("is_accepted_contact", payer)]
+/// Context for queueing is_mutual_contact computation
+#[queue_computation_accounts("is_mutual_contact", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
-pub struct CheckIsContact<'info> {
+pub struct CheckMutualContact<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
@@ -1847,7 +1752,7 @@ pub struct CheckIsContact<'info> {
     #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account, ErrorCode::ClusterNotSet))]
     /// CHECK: checked by arcium
     pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_IS_MUTUAL_CONTACT))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
     pub cluster_account: Account<'info, Cluster>,
@@ -1859,12 +1764,12 @@ pub struct CheckIsContact<'info> {
     pub arcium_program: Program<'info, Arcium>,
 }
 
-/// Context for is_accepted_contact callback
-#[callback_accounts("is_accepted_contact")]
+/// Context for is_mutual_contact callback
+#[callback_accounts("is_mutual_contact")]
 #[derive(Accounts)]
-pub struct IsAcceptedContactCallback<'info> {
+pub struct IsMutualContactCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_IS_ACCEPTED_CONTACT))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_IS_MUTUAL_CONTACT))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())]
     pub mxe_account: Account<'info, MXEAccount>,
@@ -1929,9 +1834,9 @@ pub struct CountAcceptedCallback<'info> {
 
 // ========== ARCIUM MPC EVENTS ==========
 
-/// Event emitted when contact check computation completes
+/// Event emitted when mutual contact check computation completes
 #[event]
-pub struct ContactCheckResult {
+pub struct MutualContactResult {
     pub ciphertext: [u8; 32],
     pub nonce: u128,
     pub encryption_key: [u8; 32],

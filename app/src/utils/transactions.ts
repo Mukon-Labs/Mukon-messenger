@@ -48,12 +48,13 @@ const DISCRIMINATORS = {
   invite_to_group_compressed: Buffer.from([0x20, 0x35, 0xa0, 0x27, 0x5f, 0x4e, 0xd7, 0xb9]), // 2035a0275f4ed7b9
   accept_group_invite_compressed: Buffer.from([0x05, 0x90, 0xdc, 0xba, 0x61, 0x11, 0xbd, 0xff]), // 0590dcba6111bdff
   reject_group_invite_compressed: Buffer.from([0x61, 0x09, 0x98, 0x1d, 0xfc, 0x5a, 0x0d, 0x9c]), // 6109981dfc5a0d9c
-  // Arcium MPC instructions (UPDATE AFTER anchor build + scripts/update-discriminators.js)
-  init_is_accepted_contact_comp_def: Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), // PLACEHOLDER
-  init_count_accepted_comp_def: Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), // PLACEHOLDER
-  init_add_two_numbers_comp_def: Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), // PLACEHOLDER
-  check_is_contact: Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), // PLACEHOLDER
-  count_accepted_contacts: Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), // PLACEHOLDER
+  close_wallet_descriptor: Buffer.from([0x9f, 0x11, 0x66, 0x26, 0xc1, 0x44, 0xbc, 0x54]), // 9f116626c144bc54
+  // Arcium MPC instructions
+  init_is_mutual_contact_comp_def: Buffer.from([0x0b, 0x2e, 0xb2, 0xaa, 0xc0, 0x96, 0x1b, 0xd0]), // 0b2eb2aac0961bd0
+  init_count_accepted_comp_def: Buffer.from([0x11, 0xee, 0xc7, 0x80, 0x8e, 0x16, 0x75, 0x5e]), // 11eec7808e16755e
+  init_add_two_numbers_comp_def: Buffer.from([0x43, 0xee, 0x95, 0x82, 0xa3, 0xa4, 0x21, 0xf1]), // 43ee9582a3a421f1
+  check_mutual_contact: Buffer.from([0x4e, 0x62, 0x21, 0xd2, 0x9e, 0x00, 0xec, 0xac]), // 4e6221d29e00ecac
+  count_accepted_contacts: Buffer.from([0xd3, 0x76, 0x6e, 0xfb, 0xe2, 0x3a, 0x3c, 0x4d]), // d3766efbe23a3c4d
 };
 
 // PDA derivation helpers
@@ -105,6 +106,23 @@ export function getGroupKeySharePDA(groupId: Uint8Array, member: PublicKey): Pub
   return pda;
 }
 
+/**
+ * Canonical ordering helper for Relationship PDAs
+ * Returns [min(a,b), max(a,b)]
+ */
+function canonicalOrder(a: PublicKey, b: PublicKey): [PublicKey, PublicKey] {
+  return a.toBuffer().compare(b.toBuffer()) < 0 ? [a, b] : [b, a];
+}
+
+export function getRelationshipPDA(a: PublicKey, b: PublicKey): PublicKey {
+  const [min, max] = canonicalOrder(a, b);
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('relationship'), min.toBuffer(), max.toBuffer(), Buffer.from([1])],
+    PROGRAM_ID
+  );
+  return pda;
+}
+
 // Borsh serialization helpers
 function serializeString(str: string): Buffer {
   const encoded = Buffer.from(str, 'utf8');
@@ -122,7 +140,6 @@ export function createRegisterInstruction(
   avatarData: string,
   encryptionPublicKey: Uint8Array
 ): TransactionInstruction {
-  const walletDescriptor = getWalletDescriptorPDA(payer);
   const userProfile = getUserProfilePDA(payer);
 
   // Serialize instruction data: discriminator + displayName + avatarData + encryptionPublicKey
@@ -135,7 +152,6 @@ export function createRegisterInstruction(
 
   return new TransactionInstruction({
     keys: [
-      { pubkey: walletDescriptor, isSigner: false, isWritable: true },
       { pubkey: userProfile, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -154,14 +170,12 @@ export function createCloseProfileInstruction(
   payer: PublicKey
 ): TransactionInstruction {
   const userProfile = getUserProfilePDA(payer);
-  const walletDescriptor = getWalletDescriptorPDA(payer);
 
   const data = DISCRIMINATORS.close_profile;
 
   return new TransactionInstruction({
     keys: [
       { pubkey: userProfile, isSigner: false, isWritable: true },
-      { pubkey: walletDescriptor, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
@@ -178,8 +192,8 @@ export function createInviteInstruction(
   invitee: PublicKey,
   chatHash: Uint8Array
 ): TransactionInstruction {
-  const payerDescriptor = getWalletDescriptorPDA(payer);
-  const inviteeDescriptor = getWalletDescriptorPDA(invitee);
+  const [userA, userB] = canonicalOrder(payer, invitee);
+  const relationship = getRelationshipPDA(payer, invitee);
   const conversation = getConversationPDA(chatHash);
 
   // Serialize instruction data: discriminator + hash (32 bytes, no length prefix for fixed array)
@@ -192,8 +206,9 @@ export function createInviteInstruction(
     keys: [
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: invitee, isSigner: false, isWritable: false },
-      { pubkey: payerDescriptor, isSigner: false, isWritable: true },
-      { pubkey: inviteeDescriptor, isSigner: false, isWritable: true },
+      { pubkey: userA, isSigner: false, isWritable: false },
+      { pubkey: userB, isSigner: false, isWritable: false },
+      { pubkey: relationship, isSigner: false, isWritable: true },
       { pubkey: conversation, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
@@ -209,18 +224,18 @@ export function createAcceptInstruction(
   payer: PublicKey,
   peer: PublicKey
 ): TransactionInstruction {
-  const payerDescriptor = getWalletDescriptorPDA(payer);
-  const peerDescriptor = getWalletDescriptorPDA(peer);
+  const [userA, userB] = canonicalOrder(payer, peer);
+  const relationship = getRelationshipPDA(payer, peer);
 
-  // Serialize instruction data: just discriminator (no args)
   const data = DISCRIMINATORS.accept;
 
   return new TransactionInstruction({
     keys: [
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: peer, isSigner: false, isWritable: false },
-      { pubkey: payerDescriptor, isSigner: false, isWritable: true },
-      { pubkey: peerDescriptor, isSigner: false, isWritable: true },
+      { pubkey: userA, isSigner: false, isWritable: false },
+      { pubkey: userB, isSigner: false, isWritable: false },
+      { pubkey: relationship, isSigner: false, isWritable: true },
     ],
     programId: PROGRAM_ID,
     data,
@@ -234,8 +249,8 @@ export function createRejectInstruction(
   payer: PublicKey,
   peer: PublicKey
 ): TransactionInstruction {
-  const payerDescriptor = getWalletDescriptorPDA(payer);
-  const peerDescriptor = getWalletDescriptorPDA(peer);
+  const [userA, userB] = canonicalOrder(payer, peer);
+  const relationship = getRelationshipPDA(payer, peer);
 
   const data = DISCRIMINATORS.reject;
 
@@ -243,8 +258,9 @@ export function createRejectInstruction(
     keys: [
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: peer, isSigner: false, isWritable: false },
-      { pubkey: payerDescriptor, isSigner: false, isWritable: true },
-      { pubkey: peerDescriptor, isSigner: false, isWritable: true },
+      { pubkey: userA, isSigner: false, isWritable: false },
+      { pubkey: userB, isSigner: false, isWritable: false },
+      { pubkey: relationship, isSigner: false, isWritable: true },
     ],
     programId: PROGRAM_ID,
     data,
@@ -262,8 +278,8 @@ export function createBlockInstruction(
   payer: PublicKey,
   peer: PublicKey
 ): TransactionInstruction {
-  const payerDescriptor = getWalletDescriptorPDA(payer);
-  const peerDescriptor = getWalletDescriptorPDA(peer);
+  const [userA, userB] = canonicalOrder(payer, peer);
+  const relationship = getRelationshipPDA(payer, peer);
 
   const data = DISCRIMINATORS.block;
 
@@ -271,8 +287,9 @@ export function createBlockInstruction(
     keys: [
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: peer, isSigner: false, isWritable: false },
-      { pubkey: payerDescriptor, isSigner: false, isWritable: true },
-      { pubkey: peerDescriptor, isSigner: false, isWritable: true },
+      { pubkey: userA, isSigner: false, isWritable: false },
+      { pubkey: userB, isSigner: false, isWritable: false },
+      { pubkey: relationship, isSigner: false, isWritable: true },
     ],
     programId: PROGRAM_ID,
     data,
@@ -286,8 +303,8 @@ export function createUnblockInstruction(
   payer: PublicKey,
   peer: PublicKey
 ): TransactionInstruction {
-  const payerDescriptor = getWalletDescriptorPDA(payer);
-  const peerDescriptor = getWalletDescriptorPDA(peer);
+  const [userA, userB] = canonicalOrder(payer, peer);
+  const relationship = getRelationshipPDA(payer, peer);
 
   const data = DISCRIMINATORS.unblock;
 
@@ -295,8 +312,9 @@ export function createUnblockInstruction(
     keys: [
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: peer, isSigner: false, isWritable: false },
-      { pubkey: payerDescriptor, isSigner: false, isWritable: true },
-      { pubkey: peerDescriptor, isSigner: false, isWritable: true },
+      { pubkey: userA, isSigner: false, isWritable: false },
+      { pubkey: userB, isSigner: false, isWritable: false },
+      { pubkey: relationship, isSigner: false, isWritable: true },
     ],
     programId: PROGRAM_ID,
     data,
@@ -731,6 +749,76 @@ export function deserializeWalletDescriptor(data: Buffer): WalletDescriptor {
 
   return { owner, peers };
 }
+
+// Relationship deserialization
+export interface RelationshipData {
+  userA: PublicKey;
+  userB: PublicKey;
+  statusA: number;
+  statusB: number;
+  createdAt: bigint;
+}
+
+// Status constants matching the program
+export const RELATIONSHIP_STATUS = {
+  EMPTY: 0,
+  INVITED: 1,
+  REQUESTED: 2,
+  ACCEPTED: 3,
+  REJECTED: 4,
+  BLOCKED: 5,
+} as const;
+
+const STATUS_NAME_MAP: Record<number, 'Invited' | 'Requested' | 'Accepted' | 'Rejected' | 'Blocked'> = {
+  1: 'Invited',
+  2: 'Requested',
+  3: 'Accepted',
+  4: 'Rejected',
+  5: 'Blocked',
+};
+
+export function deserializeRelationship(data: Buffer): RelationshipData {
+  let offset = 8; // Skip 8-byte discriminator
+
+  const userA = new PublicKey(data.slice(offset, offset + 32));
+  offset += 32;
+
+  const userB = new PublicKey(data.slice(offset, offset + 32));
+  offset += 32;
+
+  const statusA = data.readUInt8(offset);
+  offset += 1;
+
+  const statusB = data.readUInt8(offset);
+  offset += 1;
+
+  const createdAt = data.readBigInt64LE(offset);
+  offset += 8;
+
+  return { userA, userB, statusA, statusB, createdAt };
+}
+
+/**
+ * Given a Relationship and the current user's pubkey,
+ * return the peer's pubkey and the current user's status as a string
+ */
+export function getContactFromRelationship(
+  rel: RelationshipData,
+  myPubkey: PublicKey
+): { peerPubkey: PublicKey; myStatus: 'Invited' | 'Requested' | 'Accepted' | 'Rejected' | 'Blocked' } | null {
+  const isA = rel.userA.equals(myPubkey);
+  const isB = rel.userB.equals(myPubkey);
+  if (!isA && !isB) return null;
+
+  const myStatusNum = isA ? rel.statusA : rel.statusB;
+  const myStatus = STATUS_NAME_MAP[myStatusNum];
+  if (!myStatus) return null;
+
+  const peerPubkey = isA ? rel.userB : rel.userA;
+  return { peerPubkey, myStatus };
+}
+
+export { PROGRAM_ID };
 
 // Group types and deserialization
 export interface TokenGate {
@@ -1578,15 +1666,15 @@ const ARCIUM_FEE_POOL = new PublicKey('ARC2qzR5QYWvFcVPxfpBvTQ3wjcr7qg7rPStGpaBT
 const ARCIUM_CLOCK = new PublicKey('ARC3JqAVRc8jj1tNe4u1oGbf4VPMHYxj5VhvNhGSC3D6');
 
 /**
- * Build init_is_accepted_contact_comp_def instruction
+ * Build init_is_mutual_contact_comp_def instruction
  */
-export function createInitIsAcceptedContactCompDefInstruction(
+export function createInitIsMutualContactCompDefInstruction(
   payer: PublicKey
 ): TransactionInstruction {
   const mxeAccount = getMXEAddress();
-  const compDefAccount = getCompDefAddress('is_accepted_contact');
+  const compDefAccount = getCompDefAddress('is_mutual_contact');
 
-  const data = DISCRIMINATORS.init_is_accepted_contact_comp_def;
+  const data = DISCRIMINATORS.init_is_mutual_contact_comp_def;
 
   return new TransactionInstruction({
     keys: [
