@@ -20,6 +20,7 @@ import {
   createRejectInvitationInstruction,
   createBlockInstruction,
   createUnblockInstruction,
+  createCloseRelationshipInstruction,
   createCreateGroupInstruction,
   createUpdateGroupInstruction,
   createInviteToGroupInstruction,
@@ -109,6 +110,7 @@ interface MessengerContextType {
   deleteContact: (contactPubkey: PublicKey) => Promise<string>;
   blockContact: (contactPubkey: PublicKey) => Promise<string>;
   unblockContact: (contactPubkey: PublicKey) => Promise<string>;
+  closeRelationship: (contactPubkey: PublicKey) => Promise<string>;
   sendMessage: (conversationId: string, content: string, recipientPubkey: PublicKey, replyToMessageId?: string) => Promise<void>;
   deleteMessage: (conversationId: string, messageId: string, deleteForBoth: boolean) => void;
   joinConversation: (conversationId: string) => void;
@@ -773,11 +775,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
               });
               console.log('✅ Group key decrypted and stored locally');
 
-              // Auto-backup to on-chain after a delay (to avoid back-to-back wallet prompts)
-              // Note: Requires user to manually trigger from GroupChatScreen if they want on-chain backup
+              // MANDATORY: Immediately backup to on-chain for recovery
+              // This ensures the key survives even if socket delivery fails for future requests
               setTimeout(async () => {
                 try {
-                  // Check if already backed up
                   const backupKey = `groupKeyBackedUp_${wallet!.publicKey!.toBase58()}_${groupId}`;
                   const alreadyBackedUp = await AsyncStorage.getItem(backupKey);
                   if (alreadyBackedUp === 'true') {
@@ -785,12 +786,38 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
                     return;
                   }
 
-                  // Skip auto-backup for now (user can manually trigger from group settings)
-                  console.log('⏭️ Skipping auto on-chain backup (manual trigger available in group settings)');
+                  console.log('💾 Backing up group key on-chain (mandatory for recovery)...');
+
+                  // Encrypt key with own pubkey for on-chain storage
+                  const backupNonce = nacl.randomBytes(nacl.box.nonceLength);
+                  const encryptedKeyForBackup = nacl.box(
+                    decryptedKey,
+                    backupNonce,
+                    currentEncryptionKeys.publicKey,
+                    currentEncryptionKeys.secretKey
+                  );
+
+                  // Create and send transaction
+                  const groupIdBytes = Buffer.from(groupId, 'hex');
+                  const storeKeyIx = createStoreGroupKeyInstruction(
+                    wallet!.publicKey!,
+                    groupIdBytes,
+                    encryptedKeyForBackup,
+                    backupNonce
+                  );
+
+                  const tx = await buildTransaction(connection, wallet!.publicKey!, [storeKeyIx]);
+                  const signedTx = await wallet!.signTransaction!(tx);
+                  const sig = await connection.sendTransaction(signedTx);
+                  await connection.confirmTransaction(sig, 'confirmed');
+
+                  await AsyncStorage.setItem(backupKey, 'true');
+                  console.log('✅ Group key backed up on-chain successfully');
                 } catch (error) {
-                  console.warn('⚠️ Auto-backup check failed:', error);
+                  console.error('⚠️ Failed to backup group key on-chain:', error);
+                  // Non-fatal - local key still works, but recovery won't be possible
                 }
-              }, 10000); // 10s delay
+              }, 2000); // 2s delay to avoid immediate wallet prompt after key share
             } else {
               console.error('❌ Failed to decrypt group key (decryption returned null)');
             }
@@ -871,6 +898,27 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       newSocket.disconnect();
     };
   }, [wallet?.publicKey]);
+
+  // Auto-join all group rooms on connect so we can respond to group_key_needed requests
+  // This ensures members can share keys even when not actively viewing the chat
+  useEffect(() => {
+    if (!socket || !groups.length) return;
+
+    // Join all group rooms the user is a member of
+    for (const group of groups) {
+      const groupIdHex = Buffer.from(group.groupId).toString('hex');
+      socket.emit('join_group_room', { groupId: groupIdHex });
+    }
+    console.log(`🏠 Auto-joined ${groups.length} group room(s) for key sharing`);
+
+    // Cleanup: leave rooms on unmount (socket disconnect handles this anyway)
+    return () => {
+      for (const group of groups) {
+        const groupIdHex = Buffer.from(group.groupId).toString('hex');
+        socket.emit('leave_group_room', { groupId: groupIdHex });
+      }
+    };
+  }, [socket, groups]);
 
   // Register function
   const register = async (displayName: string, avatarData: string = '') => {
@@ -1130,6 +1178,28 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       return txSignature;
     } catch (error) {
       console.error('Failed to unblock contact:', error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const closeRelationship = async (contactPubkey: PublicKey) => {
+    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+
+    setLoading(true);
+    try {
+      const instruction = createCloseRelationshipInstruction(wallet.publicKey, contactPubkey);
+      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
+      const signedTransaction = await wallet.signTransaction(transaction);
+      const txSignature = await connection.sendTransaction(signedTransaction);
+      await connection.confirmTransaction(txSignature, 'confirmed');
+
+      await loadContacts();
+      console.log('✅ Relationship closed:', contactPubkey.toBase58().slice(0, 8));
+      return txSignature;
+    } catch (error) {
+      console.error('Failed to close relationship:', error);
       throw error;
     } finally {
       setLoading(false);
@@ -2529,6 +2599,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     deleteContact,
     blockContact,
     unblockContact,
+    closeRelationship,
     sendMessage,
     deleteMessage,
     joinConversation,

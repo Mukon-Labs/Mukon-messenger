@@ -461,7 +461,19 @@ io.on('connection', (socket) => {
 
     console.log(`🔑 Sharing group key for ${groupId.slice(0, 8)}... to ${recipientPubkey.slice(0, 8)}...`);
 
-    // Find recipient's socket
+    // ALWAYS store for later retrieval (in case socket delivery fails or they reconnect)
+    if (!pendingKeyShares.has(groupId)) {
+      pendingKeyShares.set(groupId, new Map());
+    }
+    pendingKeyShares.get(groupId).set(recipientPubkey, {
+      encryptedKey,
+      nonce,
+      senderPubkey: socket.publicKey,
+      storedAt: Date.now()
+    });
+    console.log(`📦 Stored pending key share for ${recipientPubkey.slice(0, 8)}... (total pending for group: ${pendingKeyShares.get(groupId).size})`);
+
+    // Also try to deliver immediately if online
     const recipientSocketId = onlineUsers.get(recipientPubkey);
     if (recipientSocketId) {
       io.to(recipientSocketId).emit('group_key_shared', {
@@ -470,18 +482,7 @@ io.on('connection', (socket) => {
         encryptedKey,
         nonce,
       });
-      console.log('✅ Group key shared via socket');
-    } else {
-      // Store for later retrieval
-      if (!pendingKeyShares.has(groupId)) {
-        pendingKeyShares.set(groupId, new Map());
-      }
-      pendingKeyShares.get(groupId).set(recipientPubkey, {
-        encryptedKey,
-        nonce,
-        senderPubkey: socket.publicKey
-      });
-      console.log('📦 Stored pending key share for offline user');
+      console.log('✅ Also delivered immediately via socket');
     }
   });
 
@@ -489,6 +490,12 @@ io.on('connection', (socket) => {
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
+    }
+
+    console.log(`🔍 Key request from ${socket.publicKey.slice(0, 8)}... for group ${groupId.slice(0, 8)}...`);
+    console.log(`   Pending shares for this group: ${pendingKeyShares.get(groupId)?.size || 0}`);
+    if (pendingKeyShares.get(groupId)) {
+      console.log(`   Keys stored for: ${[...pendingKeyShares.get(groupId).keys()].map(k => k.slice(0, 8)).join(', ')}`);
     }
 
     const pending = pendingKeyShares.get(groupId)?.get(socket.publicKey);
@@ -499,11 +506,13 @@ io.on('connection', (socket) => {
         encryptedKey: pending.encryptedKey,
         nonce: pending.nonce,
       });
-      pendingKeyShares.get(groupId).delete(socket.publicKey);
+      // Don't delete - keep it in case they need to request again
       console.log(`🔑 Delivered pending key share for ${groupId.slice(0, 8)}... to ${socket.publicKey.slice(0, 8)}...`);
     } else {
       // No pending share — ask other online group members to share their key
-      console.log(`⚠️ No pending key share, broadcasting key request to group room ${groupId.slice(0, 8)}...`);
+      console.log(`⚠️ No pending key share found, broadcasting key request to group room ${groupId.slice(0, 8)}...`);
+      const room = io.sockets.adapter.rooms.get(`group_${groupId}`);
+      console.log(`   Room has ${room?.size || 0} members`);
       socket.to(`group_${groupId}`).emit('group_key_needed', {
         groupId,
         requesterPubkey: socket.publicKey,

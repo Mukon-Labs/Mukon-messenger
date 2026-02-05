@@ -1,11 +1,19 @@
 import React, { useState } from 'react';
 import { View, StyleSheet, ScrollView } from 'react-native';
 import { List, Text, Button, Portal, Dialog, Divider } from 'react-native-paper';
+import { PublicKey } from '@solana/web3.js';
 import { theme } from '../theme';
 import { useMessenger } from '../contexts/MessengerContext';
 import { useWallet } from '../contexts/WalletContext';
 import { useNavigation } from '@react-navigation/native';
 import { useDarkAlert } from '../components/DarkAlert';
+
+// Test wallets with stale relationships (for dev cleanup)
+const TEST_WALLETS = [
+  'Hx2ED5bfbDaDxAYHFiGjLQ7bYVcZ4bPQd7L2PA52nQkD',
+  '39Eui8zXW8S14TkTQX9dE4yRhHYqpk1B9GcUEzWFnoXw',
+  '3uBhqxZT3oCY9F9127YvU3XeoZC4ouB2yCzf3HdgXzLr',
+];
 
 export default function SettingsScreen() {
   const messenger = useMessenger();
@@ -144,6 +152,49 @@ export default function SettingsScreen() {
           titleStyle={styles.dangerText}
           descriptionStyle={styles.dangerDescription}
           onPress={handleCloseProfile}
+          style={[styles.listItem, styles.dangerItem]}
+        />
+
+        <List.Item
+          title="Close Stale Relationships"
+          description="Remove old contact PDAs (for testing)"
+          left={(props) => <List.Icon {...props} icon="account-remove" color={theme.colors.error} />}
+          titleStyle={styles.dangerText}
+          descriptionStyle={styles.dangerDescription}
+          onPress={async () => {
+            const myKey = wallet.publicKey?.toBase58();
+            if (!myKey) return showAlert('Error', 'Wallet not connected');
+
+            const others = TEST_WALLETS.filter(w => w !== myKey);
+            if (others.length === 0) {
+              return showAlert('Error', 'Current wallet not in test list');
+            }
+
+            showAlert(
+              'Close Relationships',
+              `This will close ${others.length} relationship PDAs with other test wallets.`,
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Close All',
+                  style: 'destructive',
+                  onPress: async () => {
+                    let closed = 0;
+                    for (const other of others) {
+                      try {
+                        await messenger.closeRelationship(new PublicKey(other));
+                        closed++;
+                        console.log(`✅ Closed relationship with ${other.slice(0, 8)}...`);
+                      } catch (err: any) {
+                        console.log(`⏭️ Skipped ${other.slice(0, 8)}...: ${err.message?.slice(0, 50)}`);
+                      }
+                    }
+                    showAlert('Done', `Closed ${closed}/${others.length} relationships`);
+                  },
+                },
+              ]
+            );
+          }}
           style={[styles.listItem, styles.dangerItem]}
         />
       </List.Section>
