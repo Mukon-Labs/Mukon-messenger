@@ -53,6 +53,7 @@ const DISCRIMINATORS = {
   reject_group_invite_compressed: Buffer.from([0x61, 0x09, 0x98, 0x1d, 0xfc, 0x5a, 0x0d, 0x9c]), // 6109981dfc5a0d9c
   store_compressed_group_key: Buffer.from([0xaa, 0x74, 0x0b, 0x51, 0xbb, 0x27, 0x2e, 0x2f]), // aa740b51bb272e2f
   store_group_key: Buffer.from([0x25, 0x39, 0x5b, 0x44, 0x63, 0x70, 0xce, 0x9b]), // 25395b446370ce9b
+  // store_group_key_for_member: TODO - compute after program build
   unblock: Buffer.from([0xc2, 0x31, 0xad, 0x2b, 0xf6, 0xa4, 0x0e, 0x0b]), // c231ad2bf6a40e0b
   update_group: Buffer.from([0x09, 0xf2, 0x01, 0x6e, 0x5b, 0x16, 0xac, 0x61]), // 09f2016e5b16ac61
   update_profile: Buffer.from([0x62, 0x43, 0x63, 0xce, 0x56, 0x73, 0xaf, 0x01]), // 624363ce5673af01
@@ -669,6 +670,55 @@ export function createStoreGroupKeyInstruction(
       (encryptedKeyBuffer.length >> 16) & 0xff,
       (encryptedKeyBuffer.length >> 24) & 0xff,
     ]), // Vec length prefix (4 bytes little-endian)
+    encryptedKeyBuffer,
+    nonceBuffer, // 24 bytes
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: groupKeyShare, isSigner: false, isWritable: true },
+      { pubkey: group, isSigner: false, isWritable: false },
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+/**
+ * Build store_group_key_for_member instruction
+ * Allows inviter/creator to store keys for invitees
+ * (eliminates Socket.IO dependency for key distribution)
+ * 
+ * TODO: Add discriminator after program build
+ */
+export function createStoreGroupKeyForMemberInstruction(
+  payer: PublicKey,
+  groupId: Uint8Array,
+  member: PublicKey,
+  encryptedKey: Uint8Array,
+  nonce: Uint8Array
+): TransactionInstruction {
+  const groupKeyShare = getGroupKeySharePDA(groupId, member); // Key is for the member, not payer
+  const group = getGroupPDA(groupId);
+
+  const encryptedKeyBuffer = Buffer.from(encryptedKey);
+  const nonceBuffer = Buffer.from(nonce);
+
+  // TODO: Replace with actual discriminator after program build
+  const discriminator = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // PLACEHOLDER
+
+  const data = Buffer.concat([
+    discriminator,
+    Buffer.from(groupId), // 32 bytes
+    Buffer.from(member.toBytes()), // 32 bytes
+    Buffer.from([
+      encryptedKeyBuffer.length & 0xff,
+      (encryptedKeyBuffer.length >> 8) & 0xff,
+      (encryptedKeyBuffer.length >> 16) & 0xff,
+      (encryptedKeyBuffer.length >> 24) & 0xff,
+    ]), // Vec length prefix
     encryptedKeyBuffer,
     nonceBuffer, // 24 bytes
   ]);
