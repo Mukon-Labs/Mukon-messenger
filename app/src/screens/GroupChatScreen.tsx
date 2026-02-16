@@ -19,7 +19,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { theme } from '../theme';
 import ReactionPicker from '../components/ReactionPicker';
 import ChatBackground from '../components/ChatBackground';
-import { getUserProfilePDA, createStoreGroupKeyInstruction, buildTransaction } from '../utils/transactions';
+import { getUserProfilePDA } from '../utils/transactions';
 import { getGroupAvatar } from '../utils/domains';
 import { useDarkAlert } from '../components/DarkAlert';
 
@@ -57,7 +57,6 @@ export default function GroupChatScreen() {
   const [renameDialogVisible, setRenameDialogVisible] = useState(false);
   const [newName, setNewName] = useState('');
   const flatListRef = useRef<FlatList>(null);
-  const hasAttemptedBackup = useRef<Set<string>>(new Set());
 
   // Get current group
   const currentGroup = useMemo(() => {
@@ -153,84 +152,6 @@ export default function GroupChatScreen() {
 
     loadMemberProfiles();
   }, [currentGroup, connection]);
-
-  // Lazy on-chain key storage (Fix for Feature 1)
-  useEffect(() => {
-    if (!wallet?.publicKey || !wallet.signTransaction) return;
-
-    const storeGroupKeyOnChain = async () => {
-      // Session-level guard to prevent re-runs
-      if (hasAttemptedBackup.current.has(groupId)) return;
-      hasAttemptedBackup.current.add(groupId);
-
-      try {
-        // Check if we have the group key locally
-        const groupKey = groupKeys.get(groupId);
-        if (!groupKey) {
-          console.log('⚠️ No local group key found, skipping on-chain storage');
-          return;
-        }
-
-        // Check if already backed up
-        const backupKey = `groupKeyBackedUp_${wallet.publicKey.toBase58()}_${groupId}`;
-        const alreadyBackedUp = await AsyncStorage.getItem(backupKey);
-        if (alreadyBackedUp === 'true') {
-          return; // Already backed up
-        }
-
-        console.log('💾 Storing group key on-chain for recovery...');
-
-        // Get encryption keys from messenger context
-        const encryptionSig = (window as any).__mukonEncryptionSignature;
-        if (!encryptionSig) {
-          console.warn('⚠️ No encryption signature available');
-          return;
-        }
-
-        // Derive encryption keypair
-        const { deriveEncryptionKeypair } = await import('../utils/encryption');
-        const encryptionKeys = deriveEncryptionKeypair(encryptionSig);
-
-        // Encrypt key with own pubkey
-        const nonce = nacl.randomBytes(nacl.box.nonceLength);
-        const encryptedKey = nacl.box(
-          groupKey,
-          nonce,
-          encryptionKeys.publicKey,
-          encryptionKeys.secretKey
-        );
-
-        // Create instruction
-        const groupIdBytes = Buffer.from(groupId, 'hex');
-        const storeKeyIx = createStoreGroupKeyInstruction(
-          wallet.publicKey,
-          groupIdBytes,
-          encryptedKey,
-          nonce
-        );
-
-        // Build, sign, and send transaction
-        const tx = await buildTransaction(connection, wallet.publicKey, [storeKeyIx]);
-        const signedTx = await wallet.signTransaction(tx);
-        const sig = await connection.sendTransaction(signedTx);
-        await connection.confirmTransaction(sig, 'confirmed');
-
-        // Mark as backed up
-        await AsyncStorage.setItem(backupKey, 'true');
-        console.log('✅ Group key stored on-chain successfully');
-      } catch (error) {
-        console.error('Failed to store group key on-chain:', error);
-        // Non-fatal - local key still works
-      }
-    };
-
-    // Fix 3: Delay backup by 10 seconds to avoid back-to-back wallet prompts
-    const backupTimeout = setTimeout(() => {
-      storeGroupKeyOnChain();
-    }, 10000);
-
-    return () => clearTimeout(backupTimeout);
-  }, [groupId]);
 
   // Load messages and join room on mount
   useFocusEffect(

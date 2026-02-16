@@ -8,6 +8,7 @@ interface WalletContextType {
   publicKey: PublicKey | null;
   connected: boolean;
   connecting: boolean;
+  isRestoring: boolean;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
   signMessage: (message: Uint8Array) => Promise<Uint8Array>;
@@ -36,6 +37,36 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [isRestoring, setIsRestoring] = useState(true);
+
+  // Helper to reestablish wallet connection using stored session
+  const reestablishConnection = useCallback(async (token: string, pubkey: PublicKey, encryptionSig: Uint8Array): Promise<boolean> => {
+    try {
+      console.log('🔄 Attempting to reestablish wallet connection...');
+      
+      // Try to reauthorize with the stored token
+      await transact(async (wallet) => {
+        await wallet.reauthorize({
+          cluster: 'devnet',
+          identity: APP_IDENTITY,
+          auth_token: token,
+        });
+      });
+      
+      // If reauthorize succeeds, restore session state
+      setAuthToken(token);
+      setPublicKey(pubkey);
+      setConnected(true);
+      (window as any).__mukonEncryptionSignature = encryptionSig;
+      
+      console.log('✅ Wallet session reestablished!');
+      return true;
+    } catch (error) {
+      console.log('⚠️ Reauthorize failed, session may have expired:', error);
+      // Session expired - return false so we can fall back to authorize
+      return false;
+    }
+  }, []);
 
   // Restore wallet session on mount
   useEffect(() => {
@@ -46,23 +77,30 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const storedEncryptionSig = await AsyncStorage.getItem('@mukon_encryption_sig');
 
         if (storedToken && storedPubkey && storedEncryptionSig) {
-          console.log('📱 Restoring wallet session from storage...');
-          setAuthToken(storedToken);
-          setPublicKey(new PublicKey(storedPubkey));
-          setConnected(true);
+          console.log('📱 Found stored wallet session, attempting to restore...');
+          const pubkey = new PublicKey(storedPubkey);
+          const encryptionSig = Uint8Array.from(JSON.parse(storedEncryptionSig));
 
-          // Restore encryption signature
-          (window as any).__mukonEncryptionSignature = Uint8Array.from(JSON.parse(storedEncryptionSig));
-          console.log('✅ Session restored without wallet popup!');
+          // Try to reestablish connection with stored session
+          const success = await reestablishConnection(storedToken, pubkey, encryptionSig);
+          
+          if (!success) {
+            // Session expired - clear storage and require fresh auth
+            console.log('🗑️ Stored session expired, clearing...');
+            await AsyncStorage.multiRemove(['@mukon_auth_token', '@mukon_pubkey', '@mukon_encryption_sig']);
+            // User will need to reconnect via connect()
+          }
         }
       } catch (error) {
         console.error('Failed to restore session:', error);
         await AsyncStorage.multiRemove(['@mukon_auth_token', '@mukon_pubkey', '@mukon_encryption_sig']);
+      } finally {
+        setIsRestoring(false);
       }
     };
 
     restoreSession();
-  }, []);
+  }, [reestablishConnection]);
 
   const connect = useCallback(async () => {
     setConnecting(true);
@@ -73,12 +111,23 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
         let authResult;
         if (existingToken) {
-          console.log('🔄 Reauthorizing with existing token (no popup)...');
-          authResult = await wallet.reauthorize({
-            cluster: 'devnet',
-            identity: APP_IDENTITY,
-            auth_token: existingToken,
-          });
+          try {
+            console.log('🔄 Reauthorizing with existing token (no popup)...');
+            authResult = await wallet.reauthorize({
+              cluster: 'devnet',
+              identity: APP_IDENTITY,
+              auth_token: existingToken,
+            });
+          } catch (reauthError) {
+            // Session expired - fall back to fresh authorize
+            console.log('⚠️ Reauthorize failed, falling back to fresh authorize...');
+            // Clear expired token from storage
+            await AsyncStorage.removeItem('@mukon_auth_token');
+            authResult = await wallet.authorize({
+              cluster: 'devnet',
+              identity: APP_IDENTITY,
+            });
+          }
         } else {
           console.log('🆕 First-time authorization...');
           authResult = await wallet.authorize({
@@ -165,19 +214,29 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     if (!authToken) throw new Error('No auth token available');
 
     return await transact(async (wallet) => {
-      // Use reauthorize to avoid popup
-      const authResult = await wallet.reauthorize({
-        cluster: 'devnet',
-        identity: APP_IDENTITY,
-        auth_token: authToken,
-      });
+      try {
+        // Try reauthorize first
+        const authResult = await wallet.reauthorize({
+          cluster: 'devnet',
+          identity: APP_IDENTITY,
+          auth_token: authToken,
+        });
 
-      const signedMessages = await wallet.signMessages({
-        addresses: [authResult.accounts[0].address],
-        payloads: [message],
-      });
+        const signedMessages = await wallet.signMessages({
+          addresses: [authResult.accounts[0].address],
+          payloads: [message],
+        });
 
-      return signedMessages[0];
+        return signedMessages[0];
+      } catch (error) {
+        // Session expired - clear state and throw error
+        console.error('Session expired during signMessage:', error);
+        setPublicKey(null);
+        setConnected(false);
+        setAuthToken(null);
+        await AsyncStorage.multiRemove(['@mukon_auth_token', '@mukon_pubkey', '@mukon_encryption_sig']);
+        throw new Error('Wallet session expired. Please reconnect your wallet.');
+      }
     });
   }, [publicKey, authToken]);
 
@@ -188,20 +247,30 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     if (!authToken) throw new Error('No auth token available');
 
     return await transact(async (wallet) => {
-      // Use reauthorize to avoid popup
-      await wallet.reauthorize({
-        cluster: 'devnet',
-        identity: APP_IDENTITY,
-        auth_token: authToken,
-      });
+      try {
+        // Try reauthorize first
+        await wallet.reauthorize({
+          cluster: 'devnet',
+          identity: APP_IDENTITY,
+          auth_token: authToken,
+        });
 
-      // Pass the transaction object directly to signTransactions
-      const signedTxs = await wallet.signTransactions({
-        transactions: [transaction],
-      });
+        // Pass the transaction object directly to signTransactions
+        const signedTxs = await wallet.signTransactions({
+          transactions: [transaction],
+        });
 
-      // wallet.signTransactions returns the signed transactions
-      return signedTxs[0];
+        // wallet.signTransactions returns the signed transactions
+        return signedTxs[0];
+      } catch (error) {
+        // Session expired - clear state and throw error
+        console.error('Session expired during signTransaction:', error);
+        setPublicKey(null);
+        setConnected(false);
+        setAuthToken(null);
+        await AsyncStorage.multiRemove(['@mukon_auth_token', '@mukon_pubkey', '@mukon_encryption_sig']);
+        throw new Error('Wallet session expired. Please reconnect your wallet.');
+      }
     });
   }, [publicKey, authToken]);
 
@@ -246,6 +315,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     publicKey,
     connected,
     connecting,
+    isRestoring,
     connect,
     disconnect,
     signMessage,

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useMemo } from 'react';
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey, TransactionInstruction } from '@solana/web3.js';
 import { io, Socket } from 'socket.io-client';
 import nacl from 'tweetnacl';
 import { Buffer } from 'buffer';
@@ -30,6 +30,7 @@ import {
   createKickMemberInstruction,
   createCloseGroupInstruction,
   createStoreGroupKeyInstruction,
+  createStoreGroupKeyForMemberInstruction,
   createCloseGroupKeyInstruction,
   // ZK Compression instructions
   createStoreCompressedGroupKeyInstruction,
@@ -90,9 +91,12 @@ interface Profile {
   encryptionPublicKey?: string;
 }
 
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
+
 interface MessengerContextType {
   connection: Connection;
   socket: Socket | null;
+  connectionStatus: ConnectionStatus;
   profile: Profile | null;
   contacts: Contact[];
   messages: Map<string, any[]>;
@@ -162,6 +166,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   cluster = 'devnet',
 }) => {
   const [socket, setSocket] = useState<Socket | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [profile, setProfile] = useState<Profile | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [messages, setMessages] = useState<Map<string, any[]>>(new Map());
@@ -173,6 +178,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   const derivingKeys = useRef(false);
   // Group state
   const [groups, setGroups] = useState<Group[]>([]);
+  const groupsRef = useRef<Group[]>([]);
   const [groupInvites, setGroupInvites] = useState<GroupInvite[]>([]);
   const [groupMessages, setGroupMessages] = useState<Map<string, any[]>>(new Map());
   const [groupKeys, setGroupKeys] = useState<Map<string, Uint8Array>>(new Map()); // groupId -> symmetric key
@@ -448,21 +454,30 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     const newSocket = io(BACKEND_URL, {
       path: '/socket.io',
       transports: ['polling', 'websocket'], // Try polling first (works on restricted networks)
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
+      reconnectionAttempts: 10, // Increased from 5
+      reconnectionDelay: 1000, // Initial delay (will be exponential)
+      reconnectionDelayMax: 30000, // Max delay 30 seconds
       timeout: 30000, // Increase timeout for physical device
       forceNew: true,
       autoConnect: true,
     });
 
-    newSocket.on('connect', async () => {
-      console.log('✅ Connected to backend via', newSocket.io.engine.transport.name);
+    // Set initial connection status
+    setConnectionStatus('connecting');
+
+    // Authentication function - extracted for reuse on reconnect
+    const authenticateSocket = async () => {
+      if (!newSocket.connected) {
+        console.warn('Socket not connected, skipping authentication');
+        return;
+      }
 
       try {
         // Reuse encryption signature for socket authentication (no new popup!)
         const encryptionSig = (window as any).__mukonEncryptionSignature;
         if (!encryptionSig) {
           console.error('❌ No encryption signature available for socket auth');
+          setConnectionStatus('disconnected');
           return;
         }
 
@@ -474,15 +489,136 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         console.log('🔐 Socket authenticated with cached signature (no popup)');
       } catch (error) {
         console.error('❌ Failed to authenticate:', error);
+        setConnectionStatus('disconnected');
       }
+    };
+
+    // Resync missed messages after reconnection
+    const resyncMessages = async () => {
+      if (!wallet?.publicKey) return;
+
+      console.log('🔄 Re-syncing missed messages after reconnect...');
+
+      try {
+        // Reuse encryption signature for API calls (no popup!)
+        const encryptionSig = (window as any).__mukonEncryptionSignature;
+        if (!encryptionSig) {
+          console.warn('No encryption signature available for message resync');
+          return;
+        }
+
+        const signatureB58 = bs58.encode(encryptionSig);
+        const sender = wallet.publicKey.toBase58();
+
+        // Fetch latest conversations and their messages
+        // We'll fetch from a "sync" endpoint or fetch all recent messages
+        const syncUrl = `${BACKEND_URL}/messages/sync?sender=${encodeURIComponent(sender)}&signature=${encodeURIComponent(signatureB58)}`;
+        
+        try {
+          const response = await fetch(syncUrl);
+          if (response.ok) {
+            const data = await response.json();
+            if (data.messages && Array.isArray(data.messages)) {
+              console.log(`📥 Received ${data.messages.length} messages from sync`);
+              
+              // Process each message and add to state if not already present
+              for (const message of data.messages) {
+                if (message.conversationId) {
+                  setMessages((prev) => {
+                    const updated = new Map(prev);
+                    const conversationMessages = updated.get(message.conversationId) || [];
+                    
+                    // Check if message already exists
+                    const exists = conversationMessages.some(
+                      (msg: any) =>
+                        msg.id === message.id ||
+                        (msg.encrypted && message.encrypted &&
+                         msg.encrypted === message.encrypted &&
+                         msg.nonce === message.nonce &&
+                         msg.sender === message.sender) ||
+                        (msg.content && message.content &&
+                         msg.content === message.content &&
+                         Math.abs(msg.timestamp - message.timestamp) < 5000)
+                    );
+                    
+                    if (!exists) {
+                      updated.set(message.conversationId, [...conversationMessages, message]);
+                    }
+                    
+                    return updated;
+                  });
+                }
+              }
+              console.log('✅ Message resync complete');
+            }
+          }
+        } catch (syncError) {
+          // If /sync endpoint doesn't exist, try individual conversation resync
+          console.log('Sync endpoint not available, skipping message resync');
+        }
+
+        // Rejoin all active conversation rooms
+        for (const [conversationId] of messages) {
+          newSocket.emit('join_conversation', { conversationId });
+        }
+        console.log('🔄 Re-joined conversation rooms');
+
+        // Rejoin all group rooms
+        for (const group of groups) {
+          const groupIdHex = Buffer.from(group.groupId).toString('hex');
+          newSocket.emit('join_group_room', { groupId: groupIdHex });
+        }
+        console.log('🔄 Re-joined group rooms');
+
+      } catch (error) {
+        console.error('❌ Failed to resync messages:', error);
+      }
+    };
+
+    newSocket.on('connect', async () => {
+      console.log('✅ Connected to backend via', newSocket.io.engine.transport.name);
+      setConnectionStatus('connected');
+      await authenticateSocket();
     });
 
     newSocket.on('connect_error', (error) => {
       console.error('❌ Socket connection error:', error.message);
+      setConnectionStatus('disconnected');
     });
 
     newSocket.on('disconnect', (reason) => {
       console.log('⚠️  Disconnected from backend:', reason);
+      // Don't set to disconnected immediately - wait for reconnection attempts
+      if (reason === 'io server disconnect') {
+        // Server initiated disconnect, don't auto-reconnect
+        setConnectionStatus('disconnected');
+      }
+    });
+
+    // Handle reconnection with exponential backoff
+    newSocket.io.on('reconnect_attempt', (attemptNumber) => {
+      console.log(`🔄 Reconnection attempt ${attemptNumber}...`);
+      setConnectionStatus('reconnecting');
+    });
+
+    newSocket.io.on('reconnect', async () => {
+      console.log('✅ Reconnected to backend');
+      setConnectionStatus('connected');
+      
+      // Re-authenticate after reconnection
+      await authenticateSocket();
+      
+      // Resync missed messages
+      await resyncMessages();
+    });
+
+    newSocket.io.on('reconnect_failed', () => {
+      console.error('❌ All reconnection attempts failed');
+      setConnectionStatus('disconnected');
+    });
+
+    newSocket.io.on('reconnect_error', (error) => {
+      console.error('❌ Reconnection error:', error.message);
     });
 
     newSocket.on('authenticated', (data: any) => {
@@ -490,6 +626,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         console.log('Authenticated with backend');
       } else {
         console.error('Authentication failed:', data.error);
+        setConnectionStatus('disconnected');
       }
     });
 
@@ -1793,7 +1930,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         encryptionKeys.secretKey
       );
 
-      // Build array of instructions: create + invites + store key (combined into ONE transaction)
+      // Build array of instructions: create + invites + store keys (combined into ONE transaction)
       // Use ZK Compression for key storage and invites when enabled (90% storage cost reduction)
       const inviteInstructions = await Promise.all(
         invitees.map(invitee =>
@@ -1819,7 +1956,60 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
             adminNonce
           );
 
-      const instructions = [
+      // Fetch invitees' encryption public keys and create store_group_key_for_member instructions
+      // This eliminates Socket.IO dependency for key distribution
+      const storeKeysForMembersInstructions: TransactionInstruction[] = [];
+      for (const inviteePubkey of invitees) {
+        try {
+          // Try to find invitee in contacts first
+          let inviteeEncryptionPubkey: Uint8Array | undefined = contacts.find(c =>
+            c.publicKey.equals(inviteePubkey)
+          )?.encryptionPublicKey;
+
+          // If not in contacts, fetch from on-chain
+          if (!inviteeEncryptionPubkey) {
+            console.log(`Fetching encryption pubkey from on-chain for ${inviteePubkey.toBase58().slice(0, 8)}...`);
+            const profilePDA = getUserProfilePDA(inviteePubkey);
+            const profileAccount = await connection.getAccountInfo(profilePDA);
+
+            if (profileAccount) {
+              // UserProfile layout: discriminator(8) + owner(32) + name(4+len) + avatar_type(1) + avatar_data(4+len) + encryption_pubkey(32)
+              // We need the last 32 bytes
+              const data = profileAccount.data;
+              inviteeEncryptionPubkey = new Uint8Array(data.slice(data.length - 32));
+            }
+          }
+
+          if (inviteeEncryptionPubkey) {
+            // Encrypt group key with invitee's public key
+            const nonce = nacl.randomBytes(nacl.box.nonceLength);
+            const encryptedKey = nacl.box(
+              groupSecret,
+              nonce,
+              inviteeEncryptionPubkey,
+              encryptionKeys.secretKey
+            );
+
+            // Store encrypted key on-chain for the invitee (eliminates Socket.IO dependency)
+            const storeKeyForMemberInstruction = createStoreGroupKeyForMemberInstruction(
+              wallet.publicKey,
+              groupId,
+              inviteePubkey,
+              encryptedKey,
+              nonce
+            );
+            storeKeysForMembersInstructions.push(storeKeyForMemberInstruction);
+
+            console.log(`🔑 Will store group key on-chain for ${inviteePubkey.toBase58().slice(0, 8)}...`);
+          } else {
+            console.warn(`⚠️ Could not find encryption pubkey for ${inviteePubkey.toBase58().slice(0, 8)}...`);
+          }
+        } catch (err) {
+          console.error(`Failed to prepare store group key for member ${inviteePubkey.toBase58().slice(0, 8)}:`, err);
+        }
+      }
+
+      const instructions: TransactionInstruction[] = [
         createCreateGroupInstruction(
           wallet.publicKey,
           groupId,
@@ -1828,7 +2018,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           tokenGate || null
         ),
         ...inviteInstructions,
-        storeKeyInstruction
+        storeKeyInstruction,
+        ...storeKeysForMembersInstructions
       ];
 
       // Single transaction with all instructions
@@ -1841,6 +2032,9 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       console.log(`✅ Group created with ${invitees.length} invites (single signature):`, groupIdHex);
       console.log(`💾 Admin's encrypted group key stored on-chain`);
+      if (storeKeysForMembersInstructions.length > 0) {
+        console.log(`💾 Stored group keys on-chain for ${storeKeysForMembersInstructions.length} invitee(s)`);
+      }
 
       // Mark as backed up so GroupChatScreen doesn't re-store
       const backupKey = `groupKeyBackedUp_${wallet.publicKey.toBase58()}_${groupIdHex}`;
@@ -1957,59 +2151,75 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     setLoading(true);
     try {
-      // ALWAYS use regular PDA version (not compressed)
-      // Compressed operations fail on devnet with unknown account errors
-      const instruction = createInviteToGroupInstruction(wallet.publicKey, groupId, inviteePubkey);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
+      // Get group secret key for encrypting for the invitee
+      const groupIdHex = Buffer.from(groupId).toString('hex');
+      const groupSecret = groupKeysRef.current.get(groupIdHex);
+      if (!groupSecret) {
+        throw new Error('Group secret key not found. Please reload the group.');
+      }
+
+      // Fetch invitee's encryption public key
+      let inviteeEncryptionPubkey: Uint8Array | undefined = contacts.find(c =>
+        c.publicKey.equals(inviteePubkey)
+      )?.encryptionPublicKey;
+
+      // If not in contacts, fetch from on-chain
+      if (!inviteeEncryptionPubkey) {
+        console.log(`Fetching encryption pubkey from on-chain for ${inviteePubkey.toBase58().slice(0, 8)}...`);
+        const profilePDA = getUserProfilePDA(inviteePubkey);
+        const profileAccount = await connection.getAccountInfo(profilePDA);
+
+        if (profileAccount) {
+          // UserProfile layout: discriminator(8) + owner(32) + name(4+len) + avatar_type(1) + avatar_data(4+len) + encryption_pubkey(32)
+          // We need the last 32 bytes
+          const data = profileAccount.data;
+          inviteeEncryptionPubkey = new Uint8Array(data.slice(data.length - 32));
+        }
+      }
+
+      if (!inviteeEncryptionPubkey) {
+        throw new Error(`Could not find encryption public key for invitee ${inviteePubkey.toBase58().slice(0, 8)}...`);
+      }
+
+      // Encrypt group key with invitee's public key
+      const nonce = nacl.randomBytes(nacl.box.nonceLength);
+      const encryptedKey = nacl.box(
+        groupSecret,
+        nonce,
+        inviteeEncryptionPubkey,
+        encryptionKeys.secretKey
+      );
+
+      // Build instructions: invite + store key for member (combined into ONE transaction)
+      const inviteInstruction = createInviteToGroupInstruction(wallet.publicKey, groupId, inviteePubkey);
+      const storeKeyForMemberInstruction = createStoreGroupKeyForMemberInstruction(
+        wallet.publicKey,
+        groupId,
+        inviteePubkey,
+        encryptedKey,
+        nonce
+      );
+
+      const transaction = await buildTransaction(connection, wallet.publicKey, [
+        inviteInstruction,
+        storeKeyForMemberInstruction
+      ]);
       const signedTransaction = await wallet.signTransaction(transaction);
       const txSignature = await connection.sendTransaction(signedTransaction);
       await connection.confirmTransaction(txSignature, 'confirmed');
 
-      // Share group key with invitee via Socket.IO (Fix 2d: use ref to avoid stale closure)
-      const groupIdHex = Buffer.from(groupId).toString('hex');
-      const groupSecret = groupKeysRef.current.get(groupIdHex);
+      console.log(`✅ Invited ${inviteePubkey.toBase58().slice(0, 8)}... to group`);
+      console.log(`💾 Stored group key on-chain for invitee`);
 
-      if (groupSecret && socket) {
-        // Try to find invitee in contacts first
-        let inviteeEncryptionPubkey: Uint8Array | undefined = contacts.find(c =>
-          c.publicKey.equals(inviteePubkey)
-        )?.encryptionPublicKey;
-
-        // If not in contacts, fetch from on-chain
-        if (!inviteeEncryptionPubkey) {
-          console.log(`Fetching encryption pubkey from on-chain for ${inviteePubkey.toBase58().slice(0, 8)}...`);
-          const profilePDA = getUserProfilePDA(inviteePubkey);
-          const profileAccount = await connection.getAccountInfo(profilePDA);
-
-          if (profileAccount) {
-            // UserProfile layout: discriminator(8) + owner(32) + name(4+len) + avatar_type(1) + avatar_data(4+len) + encryption_pubkey(32)
-            // We need the last 32 bytes
-            const data = profileAccount.data;
-            inviteeEncryptionPubkey = new Uint8Array(data.slice(data.length - 32));
-          }
-        }
-
-        if (inviteeEncryptionPubkey) {
-          // Encrypt group key with invitee's public key
-          const nonce = nacl.randomBytes(nacl.box.nonceLength);
-          const encryptedKey = nacl.box(
-            groupSecret,
-            nonce,
-            inviteeEncryptionPubkey,
-            encryptionKeys.secretKey
-          );
-
-          socket.emit('share_group_key', {
-            groupId: groupIdHex,
-            recipientPubkey: inviteePubkey.toBase58(),
-            encryptedKey: Buffer.from(encryptedKey).toString('base64'),
-            nonce: Buffer.from(nonce).toString('base64'),
-          });
-
-          console.log('🔑 Shared group key with invitee via Socket.IO');
-        } else {
-          console.warn(`⚠️ Could not find encryption pubkey for ${inviteePubkey.toBase58().slice(0, 8)}...`);
-        }
+      // Also share via Socket.IO for backward compatibility (can be removed once fully migrated)
+      if (socket) {
+        socket.emit('share_group_key', {
+          groupId: groupIdHex,
+          recipientPubkey: inviteePubkey.toBase58(),
+          encryptedKey: Buffer.from(encryptedKey).toString('base64'),
+          nonce: Buffer.from(nonce).toString('base64'),
+        });
+        console.log('🔑 Also shared group key via Socket.IO (backup)');
       }
 
       return txSignature;
