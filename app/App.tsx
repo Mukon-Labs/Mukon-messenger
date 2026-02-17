@@ -8,6 +8,7 @@ import { StatusBar } from 'expo-status-bar';
 import { theme } from './src/theme';
 import { WalletProvider, useWallet } from './src/contexts/WalletContext';
 import { MessengerProvider } from './src/contexts/MessengerContext';
+import { CallProvider } from './src/contexts/CallContext';
 import { AlertProvider } from './src/contexts/AlertContext';
 import WalletConnectScreen from './src/screens/WalletConnectScreen';
 import ContactsScreen from './src/screens/ContactsScreen';
@@ -21,6 +22,7 @@ import GroupChatScreen from './src/screens/GroupChatScreen';
 import GroupInfoScreen from './src/screens/GroupInfoScreen';
 import InviteMemberScreen from './src/screens/InviteMemberScreen';
 import CustomDrawer from './src/components/CustomDrawer';
+import CallUIOverlay from './src/components/CallUIOverlay';
 
 const Stack = createStackNavigator();
 const Drawer = createDrawerNavigator();
@@ -73,71 +75,74 @@ function AppNavigator() {
 
   return (
     <MessengerProvider wallet={wallet} cluster="devnet">
-      <NavigationContainer theme={navTheme}>
-        <StatusBar style="light" />
-        <Stack.Navigator
-          screenOptions={{
-            headerStyle: {
-              backgroundColor: theme.colors.surface,
-            },
-            headerTintColor: theme.colors.textPrimary,
-            headerTitleStyle: {
-              fontWeight: 'bold',
-            },
-          }}
-        >
-          <Stack.Screen
-            name="Main"
-            component={DrawerNavigatorScreens}
-            options={{ headerShown: false }}
-          />
-          <Stack.Screen
-            name="Chat"
-            component={ChatScreen}
-            options={{ headerBackTitleVisible: false }}
-          />
-          <Stack.Screen
-            name="AddContact"
-            component={AddContactScreen}
-            options={{ title: 'Add Contact' }}
-          />
-          <Stack.Screen
-            name="ContactsList"
-            component={ContactsListScreen}
-            options={{ title: 'Contacts' }}
-          />
-          <Stack.Screen
-            name="Profile"
-            component={ProfileScreen}
-            options={{ title: 'Profile' }}
-          />
-          <Stack.Screen
-            name="Settings"
-            component={SettingsScreen}
-            options={{ title: 'Settings' }}
-          />
-          <Stack.Screen
-            name="CreateGroup"
-            component={CreateGroupScreen}
-            options={{ title: 'Create Group' }}
-          />
-          <Stack.Screen
-            name="GroupChat"
-            component={GroupChatScreen}
-            options={{ headerBackTitleVisible: false }}
-          />
-          <Stack.Screen
-            name="GroupInfo"
-            component={GroupInfoScreen}
-            options={{ title: 'Group Info' }}
-          />
-          <Stack.Screen
-            name="InviteMember"
-            component={InviteMemberScreen}
-            options={{ title: 'Invite Members' }}
-          />
-        </Stack.Navigator>
-      </NavigationContainer>
+      <CallProvider>
+        <CallUIOverlay />
+        <NavigationContainer theme={navTheme}>
+          <StatusBar style="light" />
+          <Stack.Navigator
+            screenOptions={{
+              headerStyle: {
+                backgroundColor: theme.colors.surface,
+              },
+              headerTintColor: theme.colors.textPrimary,
+              headerTitleStyle: {
+                fontWeight: 'bold',
+              },
+            }}
+          >
+            <Stack.Screen
+              name="Main"
+              component={DrawerNavigatorScreens}
+              options={{ headerShown: false }}
+            />
+            <Stack.Screen
+              name="Chat"
+              component={ChatScreen}
+              options={{ headerBackTitleVisible: false }}
+            />
+            <Stack.Screen
+              name="AddContact"
+              component={AddContactScreen}
+              options={{ title: 'Add Contact' }}
+            />
+            <Stack.Screen
+              name="ContactsList"
+              component={ContactsListScreen}
+              options={{ title: 'Contacts' }}
+            />
+            <Stack.Screen
+              name="Profile"
+              component={ProfileScreen}
+              options={{ title: 'Profile' }}
+            />
+            <Stack.Screen
+              name="Settings"
+              component={SettingsScreen}
+              options={{ title: 'Settings' }}
+            />
+            <Stack.Screen
+              name="CreateGroup"
+              component={CreateGroupScreen}
+              options={{ title: 'Create Group' }}
+            />
+            <Stack.Screen
+              name="GroupChat"
+              component={GroupChatScreen}
+              options={{ headerBackTitleVisible: false }}
+            />
+            <Stack.Screen
+              name="GroupInfo"
+              component={GroupInfoScreen}
+              options={{ title: 'Group Info' }}
+            />
+            <Stack.Screen
+              name="InviteMember"
+              component={InviteMemberScreen}
+              options={{ title: 'Invite Members' }}
+            />
+          </Stack.Navigator>
+        </NavigationContainer>
+      </CallProvider>
     </MessengerProvider>
   );
 }

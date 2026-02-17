@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { View, SectionList, StyleSheet, TouchableOpacity } from 'react-native';
-import { Searchbar, List, Avatar, Text, Button, Divider } from 'react-native-paper';
+import { Searchbar, List, Avatar, Text, Button, Divider, IconButton } from 'react-native-paper';
 import { PublicKey } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { theme } from '../theme';
@@ -8,10 +8,12 @@ import { useWallet } from '../contexts/WalletContext';
 import { useMessenger } from '../contexts/MessengerContext';
 import { useContactNames } from '../hooks/useContactNames';
 import { getChatHash } from '../utils/encryption';
+import { useCall } from '../contexts/CallContext';
 
 export default function ContactsListScreen({ navigation }: any) {
   const wallet = useWallet();
   const messenger = useMessenger();
+  const { startCall } = useCall();
   const [searchQuery, setSearchQuery] = React.useState('');
   const displayNames = useContactNames(wallet.publicKey, messenger.contacts);
 
@@ -155,6 +157,18 @@ export default function ContactsListScreen({ navigation }: any) {
                     />
                   )
                 )}
+                right={() => (
+                    <IconButton
+                      icon="phone"
+                      iconColor={theme.colors.primary}
+                      size={24}
+                      onPress={() => startCall({
+                        id: item.pubkey,
+                        name: item.displayName,
+                        walletAddress: item.pubkey,
+                      })}
+                    />
+                  )}
                 style={styles.contactItem}
               />
             </TouchableOpacity>

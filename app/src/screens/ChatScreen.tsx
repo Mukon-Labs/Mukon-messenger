@@ -14,6 +14,7 @@ import ReactionPicker from '../components/ReactionPicker';
 import ChatBackground from '../components/ChatBackground';
 import ContactProfileModal from '../components/ContactProfileModal';
 import { useDarkAlert } from '../components/DarkAlert';
+import { useCall } from '../contexts/CallContext';
 
 export default function ChatScreen({ route, navigation }: any) {
   const { contact } = route.params;
@@ -32,6 +33,7 @@ export default function ChatScreen({ route, navigation }: any) {
   const [profileModalVisible, setProfileModalVisible] = React.useState(false);
   const wallet = useWallet();
   const messenger = useMessenger();
+  const { startCall } = useCall();
   const flatListRef = React.useRef<FlatList>(null);
 
   // Get conversation ID from the two public keys
@@ -260,6 +262,16 @@ export default function ChatScreen({ route, navigation }: any) {
       ),
       headerRight: () => (
         <View style={{ flexDirection: 'row' }}>
+          <IconButton
+            icon="phone"
+            size={20}
+            iconColor={theme.colors.primary}
+            onPress={() => startCall({
+              id: contact.pubkey,
+              name: displayName,
+              walletAddress: contact.pubkey,
+            })}
+          />
           <IconButton
             icon="information-outline"
             size={20}
