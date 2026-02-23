@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
-import { View, StyleSheet, ScrollView } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, StyleSheet, ScrollView, Switch } from 'react-native';
 import { List, Text, Button, Portal, Dialog, Divider } from 'react-native-paper';
 import { PublicKey } from '@solana/web3.js';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { theme } from '../theme';
 import { useMessenger } from '../contexts/MessengerContext';
 import { useWallet } from '../contexts/WalletContext';
@@ -21,6 +22,37 @@ export default function SettingsScreen() {
   const navigation = useNavigation();
   const { showAlert, DarkAlertComponent } = useDarkAlert();
   const [deleteDialogVisible, setDeleteDialogVisible] = useState(false);
+  const [readReceiptsEnabled, setReadReceiptsEnabled] = useState(true);
+  const [loadingReadReceipts, setLoadingReadReceipts] = useState(true);
+
+  // Load read receipts preference on mount
+  useEffect(() => {
+    const loadReadReceiptsPreference = async () => {
+      if (!wallet?.publicKey) return;
+      try {
+        const stored = await AsyncStorage.getItem(`readReceiptsEnabled_${wallet.publicKey.toBase58()}`);
+        if (stored !== null) {
+          setReadReceiptsEnabled(stored === 'true');
+        }
+      } catch (error) {
+        console.error('Failed to load read receipts preference:', error);
+      } finally {
+        setLoadingReadReceipts(false);
+      }
+    };
+    loadReadReceiptsPreference();
+  }, [wallet?.publicKey]);
+
+  const handleReadReceiptsToggle = async (value: boolean) => {
+    if (!wallet?.publicKey) return;
+    setReadReceiptsEnabled(value);
+    try {
+      await AsyncStorage.setItem(`readReceiptsEnabled_${wallet.publicKey.toBase58()}`, value.toString());
+      console.log(`✅ Read receipts preference saved: ${value}`);
+    } catch (error) {
+      console.error('Failed to save read receipts preference:', error);
+    }
+  };
 
   const handleCloseProfile = () => {
     showAlert(
@@ -87,6 +119,25 @@ export default function SettingsScreen() {
 
       <List.Section>
         <List.Subheader style={styles.subheader}>Privacy</List.Subheader>
+
+        <List.Item
+          title="Read Receipts"
+          description="Let others see when you've read their messages"
+          left={(props) => <List.Icon {...props} icon="check-all" />}
+          right={() => (
+            loadingReadReceipts ? (
+              <Text style={styles.statusText}>Loading...</Text>
+            ) : (
+              <Switch
+                value={readReceiptsEnabled}
+                onValueChange={handleReadReceiptsToggle}
+                trackColor={{ false: theme.colors.surface, true: theme.colors.primary }}
+                thumbColor={readReceiptsEnabled ? theme.colors.secondary : theme.colors.textSecondary}
+              />
+            )
+          )}
+          style={styles.listItem}
+        />
 
         <List.Item
           title="Blocked Contacts"

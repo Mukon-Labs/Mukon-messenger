@@ -25,6 +25,8 @@ import GroupInfoScreen from './src/screens/GroupInfoScreen';
 import InviteMemberScreen from './src/screens/InviteMemberScreen';
 import CustomDrawer from './src/components/CustomDrawer';
 import CallUIOverlay from './src/components/CallUIOverlay';
+import QRCodeDisplayScreen from './src/screens/QRCodeDisplayScreen';
+import QRScannerScreen from './src/screens/QRScannerScreen';
 
 const Stack = createStackNavigator();
 const Drawer = createDrawerNavigator();
@@ -141,6 +143,16 @@ function AppNavigator() {
               name="InviteMember"
               component={InviteMemberScreen}
               options={{ title: 'Invite Members' }}
+            />
+            <Stack.Screen
+              name="QRCodeDisplay"
+              component={QRCodeDisplayScreen}
+              options={{ title: 'My QR Code' }}
+            />
+            <Stack.Screen
+              name="QRScanner"
+              component={QRScannerScreen}
+              options={{ title: 'Scan QR Code' }}
             />
           </Stack.Navigator>
         </NavigationContainer>

@@ -1,16 +1,18 @@
 import React from 'react';
 import { View, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
-import { TextInput, Button, Text, Avatar, List } from 'react-native-paper';
+import { TextInput, Button, Text, Avatar, List, IconButton } from 'react-native-paper';
 import { theme } from '../theme';
 import { truncateAddress } from '../utils/encryption';
 import { useWallet } from '../contexts/WalletContext';
 import { useMessenger } from '../contexts/MessengerContext';
 import EmojiPicker from '../components/EmojiPicker';
 import { useDarkAlert } from '../components/DarkAlert';
+import { useNavigation } from '@react-navigation/native';
 
 export default function ProfileScreen() {
   const { publicKey, disconnect } = useWallet();
   const messenger = useMessenger();
+  const navigation = useNavigation();
   const { showAlert, DarkAlertComponent } = useDarkAlert();
   const [displayName, setDisplayName] = React.useState('');
   const [emojiPickerVisible, setEmojiPickerVisible] = React.useState(false);
@@ -110,6 +112,14 @@ export default function ProfileScreen() {
           title="Address"
           description={walletAddress}
           left={(props) => <List.Icon {...props} icon="wallet" />}
+          right={(props) => (
+            <IconButton
+              {...props}
+              icon="qrcode"
+              iconColor={theme.colors.primary}
+              onPress={() => navigation.navigate('QRCodeDisplay' as never)}
+            />
+          )}
           style={styles.listItem}
         />
       </List.Section>
