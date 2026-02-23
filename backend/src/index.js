@@ -5,6 +5,7 @@ const cors = require('cors');
 const { PublicKey } = require('@solana/web3.js');
 const nacl = require('tweetnacl');
 const bs58 = require('bs58').default; // bs58 v6 uses default export
+const db = require('./db');
 
 const app = express();
 const httpServer = createServer(app);
@@ -22,17 +23,174 @@ const io = new Server(httpServer, {
 app.use(cors());
 app.use(express.json());
 
-// In-memory storage (replace with Redis/DB in production)
-const messages = new Map(); // conversationId -> Message[]
+// In-memory fallback storage (used when DATABASE_URL is not set)
+const memMessages = new Map(); // conversationId -> Message[]
+const memGroupMessages = new Map(); // groupId -> Message[]
+const memReadReceipts = new Map(); // conversationId -> Map<readerPubkey, latestTimestamp>
+const memGroupReadReceipts = new Map(); // groupId -> Map<readerPubkey, latestTimestamp>
+const memGroupAvatars = new Map(); // groupId -> emoji string
+const memPendingKeyShares = new Map(); // groupId -> Map<recipientPubkey, { encryptedKey, nonce, senderPubkey, storedAt }>
+
+// Always in-memory (ephemeral connection state)
 const onlineUsers = new Map(); // pubkey -> socket.id
-// Group storage
-const groupMessages = new Map(); // groupId -> Message[]
 const groupRooms = new Map(); // groupId -> Set<socket.id>
-const pendingKeyShares = new Map(); // groupId -> Map<recipientPubkey, { encryptedKey, nonce, senderPubkey }>
-const groupAvatars = new Map(); // groupId -> emoji string (Fix 4)
-// Read receipt persistence (Fix: persist read status across sessions)
-const readReceipts = new Map(); // conversationId -> Map<readerPubkey, latestTimestamp>
-const groupReadReceipts = new Map(); // groupId -> Map<readerPubkey, latestTimestamp>
+
+// ========== STORAGE ABSTRACTION ==========
+// Each function checks db.isEnabled() and falls back to in-memory Maps
+
+const store = {
+  async saveMessage(conversationId, msg) {
+    if (db.isEnabled()) {
+      await db.saveMessage(conversationId, msg);
+    } else {
+      if (!memMessages.has(conversationId)) memMessages.set(conversationId, []);
+      memMessages.get(conversationId).push(msg);
+    }
+  },
+
+  async getMessages(conversationId) {
+    if (db.isEnabled()) {
+      return await db.getMessages(conversationId);
+    }
+    return memMessages.get(conversationId) || [];
+  },
+
+  async deleteMessage(conversationId, messageId) {
+    if (db.isEnabled()) {
+      await db.deleteMessage(conversationId, messageId);
+    } else {
+      const msgs = memMessages.get(conversationId) || [];
+      memMessages.set(conversationId, msgs.filter(m => m.id !== messageId));
+    }
+  },
+
+  async updateReactions(conversationId, messageId, reactions) {
+    if (db.isEnabled()) {
+      await db.updateReactions(conversationId, messageId, reactions);
+    }
+    // In-memory: reactions are mutated directly on the message object
+  },
+
+  async saveGroupMessage(groupId, msg) {
+    if (db.isEnabled()) {
+      await db.saveGroupMessage(groupId, msg);
+    } else {
+      if (!memGroupMessages.has(groupId)) memGroupMessages.set(groupId, []);
+      memGroupMessages.get(groupId).push(msg);
+    }
+  },
+
+  async getGroupMessages(groupId) {
+    if (db.isEnabled()) {
+      return await db.getGroupMessages(groupId);
+    }
+    return memGroupMessages.get(groupId) || [];
+  },
+
+  async deleteGroupMessage(groupId, messageId) {
+    if (db.isEnabled()) {
+      await db.deleteGroupMessage(groupId, messageId);
+    } else {
+      const msgs = memGroupMessages.get(groupId) || [];
+      memGroupMessages.set(groupId, msgs.filter(m => m.id !== messageId));
+    }
+  },
+
+  async updateGroupReactions(groupId, messageId, reactions) {
+    if (db.isEnabled()) {
+      await db.updateGroupReactions(groupId, messageId, reactions);
+    }
+  },
+
+  async setReadReceipt(conversationId, readerPubkey, latestTimestamp) {
+    if (db.isEnabled()) {
+      await db.setReadReceipt(conversationId, readerPubkey, latestTimestamp);
+    } else {
+      if (!memReadReceipts.has(conversationId)) memReadReceipts.set(conversationId, new Map());
+      const existing = memReadReceipts.get(conversationId).get(readerPubkey) || 0;
+      if (latestTimestamp > existing) {
+        memReadReceipts.get(conversationId).set(readerPubkey, latestTimestamp);
+      }
+    }
+  },
+
+  async getReadReceipts(conversationId) {
+    if (db.isEnabled()) {
+      return await db.getReadReceipts(conversationId);
+    }
+    const receipts = memReadReceipts.get(conversationId) || new Map();
+    return Array.from(receipts.entries()).map(([pubkey, timestamp]) => ({ pubkey, timestamp }));
+  },
+
+  async setGroupReadReceipt(groupId, readerPubkey, latestTimestamp) {
+    if (db.isEnabled()) {
+      await db.setGroupReadReceipt(groupId, readerPubkey, latestTimestamp);
+    } else {
+      if (!memGroupReadReceipts.has(groupId)) memGroupReadReceipts.set(groupId, new Map());
+      const existing = memGroupReadReceipts.get(groupId).get(readerPubkey) || 0;
+      if (latestTimestamp > existing) {
+        memGroupReadReceipts.get(groupId).set(readerPubkey, latestTimestamp);
+      }
+    }
+  },
+
+  async getGroupReadReceipts(groupId) {
+    if (db.isEnabled()) {
+      return await db.getGroupReadReceipts(groupId);
+    }
+    const receipts = memGroupReadReceipts.get(groupId) || new Map();
+    return Array.from(receipts.entries()).map(([pubkey, timestamp]) => ({ pubkey, timestamp }));
+  },
+
+  async setGroupAvatar(groupId, avatar) {
+    if (db.isEnabled()) {
+      await db.setGroupAvatar(groupId, avatar);
+    } else {
+      memGroupAvatars.set(groupId, avatar);
+    }
+  },
+
+  async getGroupAvatar(groupId) {
+    if (db.isEnabled()) {
+      return await db.getGroupAvatar(groupId);
+    }
+    return memGroupAvatars.get(groupId) || null;
+  },
+
+  async savePendingKeyShare(groupId, recipientPubkey, data) {
+    if (db.isEnabled()) {
+      await db.savePendingKeyShare(groupId, recipientPubkey, data);
+    } else {
+      if (!memPendingKeyShares.has(groupId)) memPendingKeyShares.set(groupId, new Map());
+      memPendingKeyShares.get(groupId).set(recipientPubkey, data);
+    }
+  },
+
+  async getPendingKeyShare(groupId, recipientPubkey) {
+    if (db.isEnabled()) {
+      return await db.getPendingKeyShare(groupId, recipientPubkey);
+    }
+    return memPendingKeyShares.get(groupId)?.get(recipientPubkey) || null;
+  },
+
+  async getPendingKeyShareCount(groupId) {
+    if (db.isEnabled()) {
+      return await db.getPendingKeyShareCount(groupId);
+    }
+    return memPendingKeyShares.get(groupId)?.size || 0;
+  },
+
+  async deleteGroupData(groupId) {
+    if (db.isEnabled()) {
+      await db.deleteGroupData(groupId);
+    } else {
+      memGroupMessages.delete(groupId);
+      memPendingKeyShares.delete(groupId);
+      memGroupAvatars.delete(groupId);
+      memGroupReadReceipts.delete(groupId);
+    }
+  },
+};
 
 // Verify wallet signature
 function verifySignature(publicKey, message, signature) {
@@ -59,8 +217,9 @@ function getConversationId(pubkey1, pubkey2) {
 }
 
 // REST endpoints
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: Date.now() });
+app.get('/health', async (req, res) => {
+  const dbHealth = await db.checkHealth();
+  res.json({ status: 'ok', timestamp: Date.now(), database: dbHealth });
 });
 
 app.post('/messages', async (req, res) => {
@@ -73,11 +232,6 @@ app.post('/messages', async (req, res) => {
       return res.status(401).json({ error: 'Invalid signature' });
     }
 
-    // Store message
-    if (!messages.has(conversationId)) {
-      messages.set(conversationId, []);
-    }
-
     const messageData = {
       id: Date.now().toString(),
       sender,
@@ -86,7 +240,7 @@ app.post('/messages', async (req, res) => {
       timestamp: Date.now()
     };
 
-    messages.get(conversationId).push(messageData);
+    await store.saveMessage(conversationId, messageData);
 
     // Broadcast to conversation participants
     io.to(conversationId).emit('new_message', messageData);
@@ -98,55 +252,53 @@ app.post('/messages', async (req, res) => {
   }
 });
 
-app.get('/messages/:conversationId', (req, res) => {
-  const { conversationId } = req.params;
-  const { sender, signature } = req.query;
+app.get('/messages/:conversationId', async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { sender, signature } = req.query;
 
-  // Accept encryption signature as proof of wallet ownership
-  const encryptionMessage = 'Sign this message to derive your encryption keys for Mukon Messenger';
-  if (!verifySignature(sender, encryptionMessage, signature)) {
-    return res.status(401).json({ error: 'Invalid signature' });
+    // Accept encryption signature as proof of wallet ownership
+    const encryptionMessage = 'Sign this message to derive your encryption keys for Mukon Messenger';
+    if (!verifySignature(sender, encryptionMessage, signature)) {
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    const conversationMessages = await store.getMessages(conversationId);
+    const readTimestamps = await store.getReadReceipts(conversationId);
+
+    res.json({
+      messages: conversationMessages,
+      readTimestamps
+    });
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ error: error.message });
   }
-
-  const conversationMessages = messages.get(conversationId) || [];
-
-  // Get persisted read receipts for this conversation (Fix: persistent read ticks)
-  const receipts = readReceipts.get(conversationId) || new Map();
-  const readTimestamps = Array.from(receipts.entries()).map(([pubkey, timestamp]) => ({
-    pubkey,
-    timestamp
-  }));
-
-  res.json({
-    messages: conversationMessages,
-    readTimestamps
-  });
 });
 
 // Group messages endpoint
-app.get('/group-messages/:groupId', (req, res) => {
-  const { groupId } = req.params;
-  const { sender, signature } = req.query;
+app.get('/group-messages/:groupId', async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { sender, signature } = req.query;
 
-  // Accept encryption signature as proof of wallet ownership
-  const encryptionMessage = 'Sign this message to derive your encryption keys for Mukon Messenger';
-  if (!verifySignature(sender, encryptionMessage, signature)) {
-    return res.status(401).json({ error: 'Invalid signature' });
+    // Accept encryption signature as proof of wallet ownership
+    const encryptionMessage = 'Sign this message to derive your encryption keys for Mukon Messenger';
+    if (!verifySignature(sender, encryptionMessage, signature)) {
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    const msgs = await store.getGroupMessages(groupId);
+    const readTimestamps = await store.getGroupReadReceipts(groupId);
+
+    res.json({
+      messages: msgs,
+      readTimestamps
+    });
+  } catch (error) {
+    console.error('Error fetching group messages:', error);
+    res.status(500).json({ error: error.message });
   }
-
-  const msgs = groupMessages.get(groupId) || [];
-
-  // Get persisted read receipts for this group (Fix: persistent read ticks)
-  const receipts = groupReadReceipts.get(groupId) || new Map();
-  const readTimestamps = Array.from(receipts.entries()).map(([pubkey, timestamp]) => ({
-    pubkey,
-    timestamp
-  }));
-
-  res.json({
-    messages: msgs,
-    readTimestamps
-  });
 });
 
 // WebSocket connection
@@ -179,7 +331,7 @@ io.on('connection', (socket) => {
     console.log(`${socket.publicKey} left conversation: ${conversationId}`);
   });
 
-  socket.on('send_message', ({ conversationId, content, encrypted, nonce, sender, timestamp, type, replyTo }) => {
+  socket.on('send_message', async ({ conversationId, content, encrypted, nonce, sender, timestamp, type, replyTo }) => {
     if (!socket.publicKey && type !== 'system') {
       socket.emit('error', { message: 'Not authenticated' });
       return;
@@ -211,10 +363,11 @@ io.on('connection', (socket) => {
     }
 
     // Store message
-    if (!messages.has(conversationId)) {
-      messages.set(conversationId, []);
+    try {
+      await store.saveMessage(conversationId, messageData);
+    } catch (err) {
+      console.error('Failed to persist message:', err);
     }
-    messages.get(conversationId).push(messageData);
 
     // Emit ack back to sender only
     socket.emit('message_ack', {
@@ -230,17 +383,18 @@ io.on('connection', (socket) => {
     io.to(conversationId).emit('new_message', messageData);
   });
 
-  socket.on('delete_message', ({ conversationId, messageId, deleteForBoth }) => {
+  socket.on('delete_message', async ({ conversationId, messageId, deleteForBoth }) => {
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
 
     if (deleteForBoth) {
-      // Delete from backend storage (delete for everyone)
-      const msgs = messages.get(conversationId) || [];
-      const filtered = msgs.filter(m => m.id !== messageId);
-      messages.set(conversationId, filtered);
+      try {
+        await store.deleteMessage(conversationId, messageId);
+      } catch (err) {
+        console.error('Failed to delete message:', err);
+      }
 
       // Broadcast deletion to everyone in room
       io.to(conversationId).emit('message_deleted', { conversationId, messageId });
@@ -249,7 +403,7 @@ io.on('connection', (socket) => {
     // If deleteForBoth is false, client handles local deletion only
   });
 
-  socket.on('add_reaction', ({ conversationId, messageId, emoji, userId }) => {
+  socket.on('add_reaction', async ({ conversationId, messageId, emoji, userId }) => {
     console.log(`📨 add_reaction received:`, { conversationId: conversationId.slice(0, 8) + '...', messageId, emoji, userId: userId.slice(0, 8) + '...' });
 
     if (!socket.publicKey) {
@@ -258,66 +412,37 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Find the message and add reaction
-    const msgs = messages.get(conversationId) || [];
-    console.log(`Found ${msgs.length} messages in conversation`);
-    const message = msgs.find(m => m.id === messageId);
+    try {
+      if (db.isEnabled()) {
+        // DB mode: fetch message reactions, mutate, save back
+        const msgs = await store.getMessages(conversationId);
+        const message = msgs.find(m => m.id === messageId);
+        if (message) {
+          const reactions = message.reactions || {};
+          applyReactionToggle(reactions, emoji, userId);
+          await store.updateReactions(conversationId, messageId, reactions);
 
-    if (message) {
-      console.log(`✅ Found message ${messageId}`);
-      if (!message.reactions) {
-        message.reactions = {};
-      }
-
-      // Check if user already reacted with this emoji
-      const alreadyReacted = message.reactions[emoji]?.includes(userId);
-
-      if (alreadyReacted) {
-        // REMOVE the reaction (toggle off)
-        const index = message.reactions[emoji].indexOf(userId);
-        message.reactions[emoji].splice(index, 1);
-        console.log(`🗑️  User removed reaction ${emoji}`);
-
-        // Clean up empty reaction arrays
-        if (message.reactions[emoji].length === 0) {
-          delete message.reactions[emoji];
+          io.to(conversationId).emit('reaction_updated', { conversationId, messageId, reactions });
+          console.log(`✅ Reaction ${emoji} toggled on message ${messageId}`);
+        } else {
+          console.error(`❌ Message ${messageId} not found`);
         }
       } else {
-        // REMOVE user from all other reactions (only one reaction per user)
-        for (const [existingEmoji, users] of Object.entries(message.reactions)) {
-          const index = users.indexOf(userId);
-          if (index > -1) {
-            users.splice(index, 1);
-            console.log(`🗑️  Removed user from ${existingEmoji}`);
-            // Clean up empty reaction arrays
-            if (users.length === 0) {
-              delete message.reactions[existingEmoji];
-            }
-          }
-        }
+        // In-memory mode: mutate directly
+        const msgs = memMessages.get(conversationId) || [];
+        const message = msgs.find(m => m.id === messageId);
+        if (message) {
+          if (!message.reactions) message.reactions = {};
+          applyReactionToggle(message.reactions, emoji, userId);
 
-        // Add user to new reaction
-        if (!message.reactions[emoji]) {
-          message.reactions[emoji] = [];
+          io.to(conversationId).emit('reaction_updated', { conversationId, messageId, reactions: message.reactions });
+          console.log(`✅ Reaction ${emoji} toggled on message ${messageId}`);
+        } else {
+          console.error(`❌ Message ${messageId} not found`);
         }
-        message.reactions[emoji].push(userId);
-        console.log(`✅ User now reacting with ${emoji}`);
       }
-
-      // Broadcast updated reactions to everyone in conversation
-      const room = io.sockets.adapter.rooms.get(conversationId);
-      const roomSize = room ? room.size : 0;
-      console.log(`Broadcasting reaction to ${roomSize} clients in room`);
-
-      io.to(conversationId).emit('reaction_updated', {
-        conversationId,
-        messageId,
-        reactions: message.reactions
-      });
-
-      console.log(`✅ Reaction ${emoji} added to message ${messageId} by ${userId.slice(0, 8)}... Final reactions:`, message.reactions);
-    } else {
-      console.error(`❌ Message ${messageId} not found in conversation ${conversationId.slice(0, 8)}...`);
+    } catch (err) {
+      console.error('Failed to update reaction:', err);
     }
   });
 
@@ -327,15 +452,12 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('messages_read', ({ conversationId, readerPubkey, latestTimestamp }) => {
-    // Persist read receipt (Fix: persistent read ticks across sessions)
-    if (!readReceipts.has(conversationId)) {
-      readReceipts.set(conversationId, new Map());
-    }
-    const existing = readReceipts.get(conversationId).get(readerPubkey) || 0;
-    if (latestTimestamp > existing) {
-      readReceipts.get(conversationId).set(readerPubkey, latestTimestamp);
+  socket.on('messages_read', async ({ conversationId, readerPubkey, latestTimestamp }) => {
+    try {
+      await store.setReadReceipt(conversationId, readerPubkey, latestTimestamp);
       console.log(`💾 Persisted read receipt: ${conversationId.slice(0, 8)}... by ${readerPubkey.slice(0, 8)}... at ${latestTimestamp}`);
+    } catch (err) {
+      console.error('Failed to persist read receipt:', err);
     }
 
     // Forward to all others in the conversation room
@@ -346,15 +468,12 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('group_messages_read', ({ groupId, readerPubkey, latestTimestamp }) => {
-    // Persist read receipt (Fix: persistent read ticks across sessions)
-    if (!groupReadReceipts.has(groupId)) {
-      groupReadReceipts.set(groupId, new Map());
-    }
-    const existing = groupReadReceipts.get(groupId).get(readerPubkey) || 0;
-    if (latestTimestamp > existing) {
-      groupReadReceipts.get(groupId).set(readerPubkey, latestTimestamp);
+  socket.on('group_messages_read', async ({ groupId, readerPubkey, latestTimestamp }) => {
+    try {
+      await store.setGroupReadReceipt(groupId, readerPubkey, latestTimestamp);
       console.log(`💾 Persisted group read receipt: ${groupId.slice(0, 8)}... by ${readerPubkey.slice(0, 8)}... at ${latestTimestamp}`);
+    } catch (err) {
+      console.error('Failed to persist group read receipt:', err);
     }
 
     socket.to(`group_${groupId}`).emit('group_messages_read', {
@@ -418,7 +537,7 @@ io.on('connection', (socket) => {
     io.to(`group_${groupId}`).emit('group_member_kicked', { groupId, memberPubkey });
   });
 
-  socket.on('send_group_message', ({ groupId, encrypted, nonce, sender, timestamp }) => {
+  socket.on('send_group_message', async ({ groupId, encrypted, nonce, sender, timestamp }) => {
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
@@ -434,10 +553,11 @@ io.on('connection', (socket) => {
     };
 
     // Store message
-    if (!groupMessages.has(groupId)) {
-      groupMessages.set(groupId, []);
+    try {
+      await store.saveGroupMessage(groupId, messageData);
+    } catch (err) {
+      console.error('Failed to persist group message:', err);
     }
-    groupMessages.get(groupId).push(messageData);
 
     // Emit ack back to sender only
     socket.emit('group_message_ack', {
@@ -453,7 +573,7 @@ io.on('connection', (socket) => {
     io.to(`group_${groupId}`).emit('group_message', messageData);
   });
 
-  socket.on('share_group_key', ({ groupId, recipientPubkey, encryptedKey, nonce }) => {
+  socket.on('share_group_key', async ({ groupId, recipientPubkey, encryptedKey, nonce }) => {
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
@@ -462,16 +582,18 @@ io.on('connection', (socket) => {
     console.log(`🔑 Sharing group key for ${groupId.slice(0, 8)}... to ${recipientPubkey.slice(0, 8)}...`);
 
     // ALWAYS store for later retrieval (in case socket delivery fails or they reconnect)
-    if (!pendingKeyShares.has(groupId)) {
-      pendingKeyShares.set(groupId, new Map());
+    try {
+      await store.savePendingKeyShare(groupId, recipientPubkey, {
+        encryptedKey,
+        nonce,
+        senderPubkey: socket.publicKey,
+        storedAt: Date.now()
+      });
+      const count = await store.getPendingKeyShareCount(groupId);
+      console.log(`📦 Stored pending key share for ${recipientPubkey.slice(0, 8)}... (total pending for group: ${count})`);
+    } catch (err) {
+      console.error('Failed to persist key share:', err);
     }
-    pendingKeyShares.get(groupId).set(recipientPubkey, {
-      encryptedKey,
-      nonce,
-      senderPubkey: socket.publicKey,
-      storedAt: Date.now()
-    });
-    console.log(`📦 Stored pending key share for ${recipientPubkey.slice(0, 8)}... (total pending for group: ${pendingKeyShares.get(groupId).size})`);
 
     // Also try to deliver immediately if online
     const recipientSocketId = onlineUsers.get(recipientPubkey);
@@ -486,19 +608,17 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('request_group_key', ({ groupId }) => {
+  socket.on('request_group_key', async ({ groupId }) => {
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
 
     console.log(`🔍 Key request from ${socket.publicKey.slice(0, 8)}... for group ${groupId.slice(0, 8)}...`);
-    console.log(`   Pending shares for this group: ${pendingKeyShares.get(groupId)?.size || 0}`);
-    if (pendingKeyShares.get(groupId)) {
-      console.log(`   Keys stored for: ${[...pendingKeyShares.get(groupId).keys()].map(k => k.slice(0, 8)).join(', ')}`);
-    }
+    const count = await store.getPendingKeyShareCount(groupId);
+    console.log(`   Pending shares for this group: ${count}`);
 
-    const pending = pendingKeyShares.get(groupId)?.get(socket.publicKey);
+    const pending = await store.getPendingKeyShare(groupId, socket.publicKey);
     if (pending) {
       socket.emit('group_key_shared', {
         groupId,
@@ -521,25 +641,34 @@ io.on('connection', (socket) => {
   });
 
   // Group avatar handlers (Fix 4)
-  socket.on('set_group_avatar', ({ groupId, avatar }) => {
+  socket.on('set_group_avatar', async ({ groupId, avatar }) => {
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
 
-    groupAvatars.set(groupId, avatar);
+    try {
+      await store.setGroupAvatar(groupId, avatar);
+    } catch (err) {
+      console.error('Failed to persist group avatar:', err);
+    }
     console.log(`🎨 Group avatar set for ${groupId.slice(0, 8)}... to ${avatar}`);
 
     // Broadcast to all group members
     socket.to(`group_${groupId}`).emit('group_avatar_updated', { groupId, avatar });
   });
 
-  socket.on('get_group_avatar', ({ groupId }, callback) => {
-    const avatar = groupAvatars.get(groupId) || null;
-    if (callback) callback(avatar);
+  socket.on('get_group_avatar', async ({ groupId }, callback) => {
+    try {
+      const avatar = await store.getGroupAvatar(groupId);
+      if (callback) callback(avatar);
+    } catch (err) {
+      console.error('Failed to fetch group avatar:', err);
+      if (callback) callback(null);
+    }
   });
 
-  socket.on('add_group_reaction', ({ groupId, messageId, emoji, userId }) => {
+  socket.on('add_group_reaction', async ({ groupId, messageId, emoji, userId }) => {
     console.log(`📨 add_group_reaction received:`, { groupId: groupId.slice(0, 8) + '...', messageId, emoji });
 
     if (!socket.publicKey) {
@@ -547,61 +676,44 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const msgs = groupMessages.get(groupId) || [];
-    const message = msgs.find(m => m.id === messageId);
+    try {
+      if (db.isEnabled()) {
+        const msgs = await store.getGroupMessages(groupId);
+        const message = msgs.find(m => m.id === messageId);
+        if (message) {
+          const reactions = message.reactions || {};
+          applyReactionToggle(reactions, emoji, userId);
+          await store.updateGroupReactions(groupId, messageId, reactions);
 
-    if (message) {
-      if (!message.reactions) {
-        message.reactions = {};
-      }
-
-      // Toggle logic (same as DMs)
-      const alreadyReacted = message.reactions[emoji]?.includes(userId);
-
-      if (alreadyReacted) {
-        const index = message.reactions[emoji].indexOf(userId);
-        message.reactions[emoji].splice(index, 1);
-        if (message.reactions[emoji].length === 0) {
-          delete message.reactions[emoji];
+          io.to(`group_${groupId}`).emit('group_reaction_updated', { groupId, messageId, reactions });
         }
       } else {
-        // Remove from other reactions
-        for (const [existingEmoji, users] of Object.entries(message.reactions)) {
-          const index = users.indexOf(userId);
-          if (index > -1) {
-            users.splice(index, 1);
-            if (users.length === 0) {
-              delete message.reactions[existingEmoji];
-            }
-          }
-        }
+        const msgs = memGroupMessages.get(groupId) || [];
+        const message = msgs.find(m => m.id === messageId);
+        if (message) {
+          if (!message.reactions) message.reactions = {};
+          applyReactionToggle(message.reactions, emoji, userId);
 
-        // Add new reaction
-        if (!message.reactions[emoji]) {
-          message.reactions[emoji] = [];
+          io.to(`group_${groupId}`).emit('group_reaction_updated', { groupId, messageId, reactions: message.reactions });
         }
-        message.reactions[emoji].push(userId);
       }
-
-      // Broadcast
-      io.to(`group_${groupId}`).emit('group_reaction_updated', {
-        groupId,
-        messageId,
-        reactions: message.reactions,
-      });
+    } catch (err) {
+      console.error('Failed to update group reaction:', err);
     }
   });
 
-  socket.on('delete_group_message', ({ groupId, messageId, deleteForBoth }) => {
+  socket.on('delete_group_message', async ({ groupId, messageId, deleteForBoth }) => {
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
 
     if (deleteForBoth) {
-      const msgs = groupMessages.get(groupId) || [];
-      const filtered = msgs.filter(m => m.id !== messageId);
-      groupMessages.set(groupId, filtered);
+      try {
+        await store.deleteGroupMessage(groupId, messageId);
+      } catch (err) {
+        console.error('Failed to delete group message:', err);
+      }
 
       io.to(`group_${groupId}`).emit('group_message_deleted', { groupId, messageId });
       console.log(`Message ${messageId} deleted for everyone in group ${groupId.slice(0, 8)}...`);
@@ -609,7 +721,7 @@ io.on('connection', (socket) => {
   });
 
   // Fix 2g: Handle group deletion
-  socket.on('group_deleted', ({ groupId }) => {
+  socket.on('group_deleted', async ({ groupId }) => {
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
@@ -618,11 +730,12 @@ io.on('connection', (socket) => {
     console.log(`🗑️  Group ${groupId.slice(0, 8)}... deleted by creator`);
 
     // Clean up all group data
-    groupMessages.delete(groupId);
+    try {
+      await store.deleteGroupData(groupId);
+    } catch (err) {
+      console.error('Failed to delete group data:', err);
+    }
     groupRooms.delete(groupId);
-    pendingKeyShares.delete(groupId);
-    groupAvatars.delete(groupId);
-    groupReadReceipts.delete(groupId);
 
     // Notify all members
     io.to(`group_${groupId}`).emit('group_deleted', { groupId });
@@ -655,10 +768,50 @@ io.on('connection', (socket) => {
   });
 });
 
+// ========== HELPERS ==========
+
+// Toggle reaction: remove if already reacted, else remove from other emojis and add
+function applyReactionToggle(reactions, emoji, userId) {
+  const alreadyReacted = reactions[emoji]?.includes(userId);
+
+  if (alreadyReacted) {
+    const index = reactions[emoji].indexOf(userId);
+    reactions[emoji].splice(index, 1);
+    if (reactions[emoji].length === 0) delete reactions[emoji];
+  } else {
+    // Remove from all other reactions first
+    for (const [existingEmoji, users] of Object.entries(reactions)) {
+      const index = users.indexOf(userId);
+      if (index > -1) {
+        users.splice(index, 1);
+        if (users.length === 0) delete reactions[existingEmoji];
+      }
+    }
+    if (!reactions[emoji]) reactions[emoji] = [];
+    reactions[emoji].push(userId);
+  }
+}
+
+// ========== STARTUP ==========
+
 const PORT = process.env.PORT || 3001;
 
-httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`Mukon Messenger backend running on port ${PORT}`);
-  console.log(`WebSocket endpoint: ws://0.0.0.0:${PORT} (accessible from Android emulator at ws://10.0.2.2:${PORT})`);
-  console.log(`HTTP endpoint: http://0.0.0.0:${PORT}`);
-});
+async function start() {
+  try {
+    const dbReady = await db.initDatabase();
+    if (dbReady) {
+      console.log('✅ Database connected and initialized');
+    }
+  } catch (err) {
+    console.error('⚠️  Database initialization failed, falling back to in-memory:', err.message);
+  }
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`Mukon Messenger backend running on port ${PORT}`);
+    console.log(`Storage: ${db.isEnabled() ? 'PostgreSQL' : 'in-memory (no DATABASE_URL)'}`);
+    console.log(`WebSocket endpoint: ws://0.0.0.0:${PORT} (accessible from Android emulator at ws://10.0.2.2:${PORT})`);
+    console.log(`HTTP endpoint: http://0.0.0.0:${PORT}`);
+  });
+}
+
+start();
