@@ -627,6 +627,42 @@ pub mod mukon_messenger {
         Ok(())
     }
 
+    /// Store a group key on behalf of another member
+    /// This allows the inviter/creator to store keys for invitees
+    /// eliminating Socket.IO dependency for key distribution
+    pub fn store_group_key_for_member(
+        ctx: Context<StoreGroupKeyForMember>,
+        group_id: [u8; 32],
+        member: Pubkey,
+        encrypted_key: Vec<u8>,
+        nonce: [u8; 24],
+    ) -> Result<()> {
+        let key_share = &mut ctx.accounts.group_key_share;
+        let group = &ctx.accounts.group;
+
+        // Verify payer is a member of the group (to authorize storing for others)
+        require!(
+            group.members.contains(&ctx.accounts.payer.key()),
+            ErrorCode::NotGroupMember
+        );
+
+        // Verify target member is in the group (or has been invited)
+        require!(
+            group.members.contains(&member),
+            ErrorCode::NotGroupMember
+        );
+
+        // Store the encrypted key share for the member
+        key_share.group_id = group_id;
+        key_share.member = member;
+        key_share.encrypted_key = encrypted_key;
+        key_share.nonce = nonce;
+
+        msg!("Group key stored for member: {:?} by: {:?}", member, ctx.accounts.payer.key());
+
+        Ok(())
+    }
+
     // ========== LIGHT PROTOCOL ZK COMPRESSION INSTRUCTIONS ==========
     //
     // KNOWN ISSUE: Light Protocol custom CPI fails on devnet with verify_proof panic.
@@ -1632,6 +1668,29 @@ pub struct CloseGroupKey<'info> {
     pub group_key_share: Account<'info, GroupKeyShare>,
     #[account(mut)]
     pub payer: Signer<'info>,
+}
+
+/// Context for storing a group key on behalf of another member
+/// Allows inviter/creator to store keys for invitees
+#[derive(Accounts)]
+#[instruction(group_id: [u8; 32], member: Pubkey, encrypted_key: Vec<u8>, nonce: [u8; 24])]
+pub struct StoreGroupKeyForMember<'info> {
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = 8 + 32 + 32 + (4 + 48) + 24,  // disc + group_id + member + Vec(encrypted_key) + nonce
+        seeds = [b"group_key", group_id.as_ref(), member.as_ref(), GROUP_KEY_SHARE_VERSION.as_ref()],
+        bump
+    )]
+    pub group_key_share: Account<'info, GroupKeyShare>,
+    #[account(
+        seeds = [b"group", group_id.as_ref(), GROUP_VERSION.as_ref()],
+        bump
+    )]
+    pub group: Account<'info, Group>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 // ========== LIGHT PROTOCOL ZK COMPRESSION CONTEXT STRUCTURES ==========

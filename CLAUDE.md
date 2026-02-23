@@ -112,14 +112,23 @@ adb install -r app-debug.apk
 
 ---
 
-## Current Status (as of 2026-02-04)
+## Current Status (as of 2026-02-23)
 
 **Deployed:**
 - Solana program: `54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy` (devnet)
 - Backend: Fly.io (https://backend-rough-bird-7310.fly.dev) - Consistent URL for dev and prod
+- Database: Fly.io Postgres (`mukon-db`, SIN region, scales to 0 when idle)
 - Arcium MXE: `5EJeKvZL6dPFcNuVVUWctDzZLU16pJA4sucg3ysPXJdr` (cluster offset 456)
 
-**Recent Work (Feb 4 - Architecture Pivot):**
+**Recent Work (Feb 23 - Backend Persistence):**
+- ✅ **Fly.io Postgres**: Messages, read receipts, group avatars, pending key shares now persist across deploys
+  - `backend/src/db.js` — connection pool, schema init, CRUD functions
+  - `backend/src/index.js` — `store` abstraction with in-memory fallback when `DATABASE_URL` not set
+  - 6 tables: messages, group_messages, read_receipts, group_read_receipts, group_avatars, pending_key_shares
+  - `onlineUsers` and `groupRooms` remain in-memory (ephemeral connection state)
+  - `/health` endpoint reports database connectivity status
+
+**Previous Work (Feb 4 - Architecture Pivot):**
 - ✅ **Per-Relationship PDAs**: Replaced WalletDescriptor (Vec<Peer>) with individual Relationship PDAs
   - Seeds: `["relationship", min(a,b), max(a,b), version]` — canonical ordering
   - 82 bytes per relationship (vs 6,904 bytes for 100-peer WalletDescriptor)
@@ -157,7 +166,7 @@ adb install -r app-debug.apk
 - ✅ Reply to messages
 - ✅ Copy message to clipboard
 - ✅ Real-time delivery (Socket.IO)
-- ✅ Message persistence (backend in-memory)
+- ✅ Message persistence (Fly.io Postgres)
 - ✅ Duplicate detection
 
 **Profile & Contacts:**
@@ -201,7 +210,7 @@ adb install -r app-debug.apk
 
 **Known Issues (Lower Priority):**
 6. **Wallet persistence** - Closing app requires full reconnect
-7. **Backend persistence** - In-memory (Maps). Deploying backend WIPES all data (messages, read receipts, avatars). On-chain data (profiles, contacts, groups) persists.
+7. ~~**Backend persistence**~~ - FIXED: Now using Fly.io Postgres. Data survives deploys.
 8. **Domain resolution** - Needs mainnet testing with real .sol/.skr domains
 9. **Group key rotation** - Only rotates on kick (security debt)
 10. **All Alert.alert popups still white** - Need to replace 87 Alert.alert calls with DarkAlert component (9 files)
@@ -268,8 +277,10 @@ SOLANA PROGRAM (Anchor + Arcium v0.7.0)
   ├── close_group_key() - Close key share account and recover rent
   └── update_profile/update_group/close_profile()
 
-MESSAGE BACKEND (WebSocket)
+MESSAGE BACKEND (WebSocket + Postgres)
   ├── Socket.IO for real-time delivery
+  ├── Fly.io Postgres (messages, receipts, avatars, key shares)
+  ├── In-memory fallback when DATABASE_URL not set (local dev)
   ├── Encrypted message blobs
   ├── Wallet signature authentication
   ├── Message deletion support
@@ -332,8 +343,10 @@ mukon-messenger/
 │   │   │   └── domains.ts
 │   │   └── config.ts        # Backend URL config
 │   └── package.json
-├── backend/                 # WebSocket relay
-│   └── src/index.js
+├── backend/                 # WebSocket relay + Postgres persistence
+│   └── src/
+│       ├── index.js         # Express + Socket.IO server
+│       └── db.js            # Postgres connection, schema, CRUD
 ├── scripts/
 │   ├── update-discriminators.js
 │   └── init-comp-defs.ts    # Initialize Arcium comp defs
@@ -596,13 +609,13 @@ const transaction = await buildTransaction(connection, wallet.publicKey, instruc
 **Deployment Timeline:**
 1. ✅ Week 1 (Jan 20-26): Core messenger MVP (DMs, groups, encryption)
 2. 🔄 Week 2 (Jan 27-30): Arcium integration, UI polish, deploy to Fly.io/mainnet, submit hackathon
-3. 🔜 Week 3+ (Feb): Add persistence, monitoring, launch on Solana Mobile dApp Store
+3. ✅ Week 3+ (Feb): Persistence (Postgres), monitoring, launch on Solana Mobile dApp Store
 
 **Before mainnet:**
-- [ ] Deploy backend to Fly.io
+- [x] Deploy backend to Fly.io
 - [ ] Make backend URL configurable (dev vs prod)
 - [ ] Deploy program to mainnet-beta
-- [ ] Add message persistence (Fly.io Postgres)
+- [x] Add message persistence (Fly.io Postgres)
 - [ ] Add monitoring (Sentry, UptimeRobot)
 - [ ] Test extensively on mainnet
 

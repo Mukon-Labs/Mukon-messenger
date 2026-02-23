@@ -706,6 +706,48 @@ export function createCloseGroupKeyInstruction(
   });
 }
 
+export function createStoreGroupKeyForMemberInstruction(
+  payer: PublicKey,
+  groupId: Uint8Array,
+  member: PublicKey,
+  encryptedKey: Uint8Array,
+  nonce: Uint8Array
+): TransactionInstruction {
+  const groupKeyShare = getGroupKeySharePDA(groupId, member);
+  const group = getGroupPDA(groupId);
+
+  const encryptedKeyBuffer = Buffer.from(encryptedKey);
+  const nonceBuffer = Buffer.from(nonce);
+
+  // TODO: Update discriminator after program rebuild via update-discriminators.js
+  const discriminator = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+  const data = Buffer.concat([
+    discriminator,
+    Buffer.from(groupId),
+    Buffer.from(member.toBytes()),
+    Buffer.from([
+      encryptedKeyBuffer.length & 0xff,
+      (encryptedKeyBuffer.length >> 8) & 0xff,
+      (encryptedKeyBuffer.length >> 16) & 0xff,
+      (encryptedKeyBuffer.length >> 24) & 0xff,
+    ]),
+    encryptedKeyBuffer,
+    nonceBuffer,
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: groupKeyShare, isSigner: false, isWritable: true },
+      { pubkey: group, isSigner: false, isWritable: false },
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
 // ========== TRANSACTION BUILDER ==========
 
 /**

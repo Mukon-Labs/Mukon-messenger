@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { io, Socket } from 'socket.io-client';
 import nacl from 'tweetnacl';
@@ -52,6 +52,7 @@ import {
 import { deriveEncryptionKeypair, getChatHash } from '../utils/encryption';
 import type { WalletContextType } from './WalletContext';
 import { BACKEND_URL, SOLANA_RPC_URL } from '../config';
+import { initializeNotifications, sendMessageNotification } from '../utils/notifications';
 // ARCIUM TEMPORARILY DISABLED - Re-enable after core demo
 // import {
 //   getMXEPubKey,
@@ -74,6 +75,8 @@ import { BACKEND_URL, SOLANA_RPC_URL } from '../config';
 // - V2 architecture is complete and ready for mainnet
 // - Fallback to regular PDA operations for hackathon demo
 const USE_ZK_COMPRESSION = false;
+
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 
 export interface Contact {
   publicKey: PublicKey;
@@ -141,6 +144,7 @@ interface MessengerContextType {
   leaveGroupRoom: (groupId: string) => void;
   groupAvatars: Map<string, string>;
   setGroupAvatarShared: (groupId: string, emoji: string) => Promise<void>;
+  connectionStatus: ConnectionStatus;
   wallet: WalletContextType | null;
   // Arcium MPC methods
   verifyContactPrivately: (queryPubkey: string) => Promise<boolean | null>;
@@ -179,6 +183,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   const [activeGroupRoom, setActiveGroupRoom] = useState<string | null>(null);
   const [readTimestamps, setReadTimestamps] = useState<Map<string, number>>(new Map()); // conversationId/groupId -> latest read timestamp
   const [groupAvatars, setGroupAvatars] = useState<Map<string, string>>(new Map()); // groupId -> emoji (Fix 4)
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
 
   // Refs for socket handlers to avoid stale closures (Fix 2b, 2d, Fix 7)
   const encryptionKeysRef = useRef<nacl.BoxKeyPair | null>(null);
@@ -186,6 +191,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   const groupKeysRef = useRef<Map<string, Uint8Array>>(new Map());
   const activeGroupRoomRef = useRef<string | null>(null);
   const activeConversationRef = useRef<string | null>(null); // Fix 7: DM unread badges
+  const groupsRef = useRef<Group[]>([]);
   const hasLoadedPersistedKeys = useRef(false); // Guard to prevent race condition on persist
 
   const connection = useMemo(
@@ -213,6 +219,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   useEffect(() => {
     activeConversationRef.current = activeConversation;
   }, [activeConversation]);
+
+  useEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
 
   // Persist group keys to AsyncStorage (Fix 2e)
   useEffect(() => {
@@ -448,25 +458,39 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     const newSocket = io(BACKEND_URL, {
       path: '/socket.io',
       transports: ['polling', 'websocket'], // Try polling first (works on restricted networks)
-      reconnectionAttempts: 5,
+      reconnectionAttempts: 10,
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 30000,
       timeout: 30000, // Increase timeout for physical device
       forceNew: true,
       autoConnect: true,
     });
 
-    newSocket.on('connect', async () => {
-      console.log('✅ Connected to backend via', newSocket.io.engine.transport.name);
+    // Set initial connection status
+    setConnectionStatus('connecting');
+
+    // Initialize push notifications
+    initializeNotifications().then((success) => {
+      if (success) {
+        console.log('✅ Push notifications initialized');
+      }
+    });
+
+    // Authentication function - extracted for reuse on reconnect
+    const authenticateSocket = async () => {
+      if (!newSocket.connected) {
+        console.warn('Socket not connected, skipping authentication');
+        return;
+      }
 
       try {
-        // Reuse encryption signature for socket authentication (no new popup!)
         const encryptionSig = (window as any).__mukonEncryptionSignature;
         if (!encryptionSig) {
           console.error('❌ No encryption signature available for socket auth');
+          setConnectionStatus('disconnected');
           return;
         }
 
-        // Use encryption signature as authentication proof
         newSocket.emit('authenticate', {
           publicKey: wallet.publicKey!.toBase58(),
           signature: bs58.encode(encryptionSig),
@@ -474,15 +498,76 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         console.log('🔐 Socket authenticated with cached signature (no popup)');
       } catch (error) {
         console.error('❌ Failed to authenticate:', error);
+        setConnectionStatus('disconnected');
       }
+    };
+
+    // Resync missed messages and rejoin rooms after reconnection
+    const resyncAfterReconnect = async () => {
+      if (!wallet?.publicKey) return;
+
+      console.log('🔄 Re-syncing after reconnect...');
+
+      try {
+        // Rejoin all active conversation rooms (using current messages Map)
+        setMessages((prev) => {
+          for (const [conversationId] of prev) {
+            newSocket.emit('join_conversation', { conversationId });
+          }
+          console.log('🔄 Re-joined conversation rooms');
+          return prev;
+        });
+
+        // Rejoin all group rooms (using ref to avoid stale closure)
+        const currentGroups = groupsRef.current;
+        for (const group of currentGroups) {
+          const groupIdHex = Buffer.from(group.groupId).toString('hex');
+          newSocket.emit('join_group_room', { groupId: groupIdHex });
+        }
+        console.log('🔄 Re-joined group rooms');
+      } catch (error) {
+        console.error('❌ Failed to resync after reconnect:', error);
+      }
+    };
+
+    newSocket.on('connect', async () => {
+      console.log('✅ Connected to backend via', newSocket.io.engine.transport.name);
+      setConnectionStatus('connected');
+      await authenticateSocket();
     });
 
     newSocket.on('connect_error', (error) => {
       console.error('❌ Socket connection error:', error.message);
+      setConnectionStatus('disconnected');
     });
 
     newSocket.on('disconnect', (reason) => {
       console.log('⚠️  Disconnected from backend:', reason);
+      if (reason === 'io server disconnect') {
+        setConnectionStatus('disconnected');
+      }
+    });
+
+    // Handle reconnection
+    newSocket.io.on('reconnect_attempt', (attemptNumber) => {
+      console.log(`🔄 Reconnection attempt ${attemptNumber}...`);
+      setConnectionStatus('reconnecting');
+    });
+
+    newSocket.io.on('reconnect', async () => {
+      console.log('✅ Reconnected to backend');
+      setConnectionStatus('connected');
+      await authenticateSocket();
+      await resyncAfterReconnect();
+    });
+
+    newSocket.io.on('reconnect_failed', () => {
+      console.error('❌ All reconnection attempts failed');
+      setConnectionStatus('disconnected');
+    });
+
+    newSocket.io.on('reconnect_error', (error) => {
+      console.error('❌ Reconnection error:', error.message);
     });
 
     newSocket.on('authenticated', (data: any) => {
@@ -490,6 +575,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         console.log('Authenticated with backend');
       } else {
         console.error('Authentication failed:', data.error);
+        setConnectionStatus('disconnected');
       }
     });
 
@@ -530,6 +616,18 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
                 console.log(`✅ Incremented unread count for ${message.conversationId.slice(0, 8)}... to ${newCount}`);
                 return updated;
               });
+
+              // Send push notification
+              const senderContact = contactsRef.current.find(
+                c => c.publicKey.toBase58() === message.sender
+              );
+              sendMessageNotification(
+                message.sender,
+                senderContact?.displayName || message.senderName,
+                message.content || 'New message',
+                message.conversationId,
+                'dm'
+              );
             }
           }
 
@@ -647,6 +745,16 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
                 console.log(`✅ Incremented unread count for group ${message.groupId.slice(0, 8)}... to ${newCount}`);
                 return updated;
               });
+
+              // Send push notification for group message
+              sendMessageNotification(
+                message.sender,
+                message.senderName || `${message.sender.slice(0, 8)}...`,
+                message.content || 'New group message',
+                message.groupId,
+                'group',
+                message.groupId
+              );
             }
           }
 
@@ -896,6 +1004,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     return () => {
       newSocket.disconnect();
+      setConnectionStatus('disconnected');
     };
   }, [wallet?.publicKey]);
 
@@ -2630,6 +2739,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     leaveGroupRoom,
     groupAvatars,
     setGroupAvatarShared,
+    connectionStatus,
     wallet,
     // Arcium MPC methods
     verifyContactPrivately,
