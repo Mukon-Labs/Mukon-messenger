@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Connection, PublicKey, Keypair, Transaction } from '@solana/web3.js';
+import { Connection, PublicKey, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { io, Socket } from 'socket.io-client';
 import nacl from 'tweetnacl';
 import { Buffer } from 'buffer';
@@ -466,6 +466,27 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
             const accountInfo = await connection.getAccountInfo(sessionTokenPDA);
 
             if (accountInfo) {
+              // Check session key balance — top up if running low
+              const balance = await connection.getBalance(kp.publicKey);
+              const MIN_BALANCE = Math.floor(0.01 * LAMPORTS_PER_SOL);
+              if (balance < MIN_BALANCE && wallet.signTransaction) {
+                console.log(`⚠️ Session key balance low (${balance / LAMPORTS_PER_SOL} SOL), topping up...`);
+                try {
+                  const topUpIx = SystemProgram.transfer({
+                    fromPubkey: wallet.publicKey!,
+                    toPubkey: kp.publicKey,
+                    lamports: Math.floor(0.05 * LAMPORTS_PER_SOL),
+                  });
+                  const topUpTx = await buildTransaction(connection, wallet.publicKey!, [topUpIx]);
+                  const signedTopUp = await wallet.signTransaction(topUpTx);
+                  const topUpSig = await connection.sendTransaction(signedTopUp);
+                  await connection.confirmTransaction(topUpSig, 'confirmed');
+                  console.log('✅ Session key topped up');
+                } catch (topUpErr) {
+                  console.warn('⚠️ Failed to top up session key:', topUpErr);
+                }
+              }
+
               console.log('✅ Loaded existing session key from storage');
               setSessionKeypair(kp);
               sessionInfoRef.current = {
@@ -488,20 +509,28 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         const newKeypair = Keypair.generate();
         const validUntil = Math.floor(Date.now() / 1000) + 7 * 24 * 3600; // 7 days
 
-        // Create session on-chain (ONE wallet popup)
+        // Create session on-chain + fund session key (ONE wallet popup)
+        // 0.05 SOL covers ~500 transactions on devnet
+        const SESSION_FUND_LAMPORTS = Math.floor(0.05 * LAMPORTS_PER_SOL);
         console.log('🔑 Creating session key (one-time wallet approval)...');
-        const instruction = createCreateSessionInstruction(
+        const createSessionIx = createCreateSessionInstruction(
           wallet.publicKey!,
           newKeypair.publicKey,
           validUntil
         );
+        const fundSessionIx = SystemProgram.transfer({
+          fromPubkey: wallet.publicKey!,
+          toPubkey: newKeypair.publicKey,
+          lamports: SESSION_FUND_LAMPORTS,
+        });
 
-        const transaction = await buildTransaction(connection, wallet.publicKey!, [instruction]);
+        // Both instructions in ONE transaction = ONE wallet popup
+        const transaction = await buildTransaction(connection, wallet.publicKey!, [createSessionIx, fundSessionIx]);
         const signedTransaction = await wallet.signTransaction!(transaction);
         const txSignature = await connection.sendTransaction(signedTransaction);
         await connection.confirmTransaction(txSignature, 'confirmed');
 
-        console.log('✅ Session key created on-chain:', txSignature);
+        console.log(`✅ Session key created + funded with ${SESSION_FUND_LAMPORTS / LAMPORTS_PER_SOL} SOL:`, txSignature);
 
         // Store session keypair in AsyncStorage
         await AsyncStorage.setItem(storageKey, JSON.stringify({
