@@ -627,11 +627,31 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           // Deserialize GroupKeyShare
           const keyShare = deserializeGroupKeyShare(accountInfo.data);
 
+          // Determine sender's encryption pubkey for NaCl box.open
+          // If we're the creator, we encrypted with our own pubkey (self-backup)
+          // If not, the admin encrypted for us — need admin's pubkey
+          let senderEncPubkey: Uint8Array = encryptionKeys.publicKey;
+
+          if (!group.creator.equals(wallet.publicKey)) {
+            // Fetch admin's encryption pubkey from on-chain profile
+            try {
+              const creatorProfilePDA = getUserProfilePDA(group.creator);
+              const creatorAccount = await connection.getAccountInfo(creatorProfilePDA);
+              if (creatorAccount) {
+                const data = creatorAccount.data;
+                senderEncPubkey = new Uint8Array(data.slice(data.length - 32));
+                console.log(`🔑 Using admin's encryption key for decryption`);
+              }
+            } catch (fetchErr) {
+              console.error('Failed to fetch admin encryption key:', fetchErr);
+            }
+          }
+
           // Decrypt the group key
           const decryptedKey = nacl.box.open(
             keyShare.encryptedKey,
             keyShare.nonce,
-            encryptionKeys.publicKey,
+            senderEncPubkey,
             encryptionKeys.secretKey
           );
 
@@ -644,6 +664,11 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
             console.log(`✅ Recovered group key from on-chain for ${groupIdHex.slice(0, 8)}...`);
           } else {
             console.error(`❌ Failed to decrypt on-chain key for group ${groupIdHex.slice(0, 8)}...`);
+            // Fallback: request via socket
+            if (socket) {
+              socket.emit('request_group_key', { groupId: groupIdHex });
+              console.log(`🔑 Fallback: requested key via socket for ${groupIdHex.slice(0, 8)}...`);
+            }
           }
         } catch (err) {
           console.error(`Failed to recover key for group ${groupIdHex.slice(0, 8)}:`, err);
@@ -2532,6 +2557,27 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     setLoading(true);
     try {
       const session = sessionInfoRef.current || undefined;
+
+      // Check if already accepted (prevents "NotInvited" error on double-tap / race condition)
+      const groupInvitePDA = getGroupInvitePDA(groupId, wallet.publicKey);
+      const inviteAccount = await connection.getAccountInfo(groupInvitePDA);
+      if (inviteAccount) {
+        const invite = deserializeGroupInvite(inviteAccount.data);
+        if (invite.status === 'Accepted') {
+          console.log('⏭️ Group invite already accepted, skipping on-chain tx');
+          await loadGroups();
+          await loadGroupInvites();
+          // Still fetch key below
+          const groupIdHex = Buffer.from(groupId).toString('hex');
+          if (encryptionKeys && !groupKeys.has(groupIdHex)) {
+            if (socket) {
+              socket.emit('request_group_key', { groupId: groupIdHex });
+            }
+          }
+          return 'already-accepted';
+        }
+      }
+
       const instruction = createAcceptGroupInviteInstruction(
         wallet.publicKey,
         groupId,
@@ -2546,7 +2592,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       const groupIdHex = Buffer.from(groupId).toString('hex');
 
-      // Try to fetch group key from on-chain (stored by inviter via store_group_key_for_member)
+      // Try to fetch group key from on-chain (stored by admin via store_group_key_for_member)
       if (encryptionKeys && !groupKeys.has(groupIdHex)) {
         try {
           const groupKeySharePDA = getGroupKeySharePDA(groupId, wallet.publicKey);
@@ -2555,12 +2601,28 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           if (accountInfo) {
             const keyShare = deserializeGroupKeyShare(accountInfo.data);
 
-            // Find the inviter's encryption pubkey to decrypt
-            // The key was encrypted with our pubkey by the inviter
+            // Key was encrypted by admin with nacl.box(secret, nonce, inviteePubkey, adminSecretKey)
+            // To decrypt: nacl.box.open(encrypted, nonce, adminPubkey, inviteeSecretKey)
+            // Fetch admin's encryption pubkey from the Group account
+            const groupPDA = getGroupPDA(groupId);
+            const groupAccount = await connection.getAccountInfo(groupPDA);
+            let senderEncPubkey = encryptionKeys.publicKey; // fallback to own
+
+            if (groupAccount) {
+              const groupData = deserializeGroup(groupAccount.data);
+              if (!groupData.creator.equals(wallet.publicKey)) {
+                const creatorProfilePDA = getUserProfilePDA(groupData.creator);
+                const creatorAccount = await connection.getAccountInfo(creatorProfilePDA);
+                if (creatorAccount) {
+                  senderEncPubkey = new Uint8Array(creatorAccount.data.slice(creatorAccount.data.length - 32));
+                }
+              }
+            }
+
             const decryptedKey = nacl.box.open(
               keyShare.encryptedKey,
               keyShare.nonce,
-              encryptionKeys.publicKey,
+              senderEncPubkey,
               encryptionKeys.secretKey
             );
 
