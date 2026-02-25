@@ -1338,7 +1338,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     };
   }, [socket, groups]);
 
-  // Register function
+  // Register function — bundles register + session key creation + funding in ONE tx
   const register = async (displayName: string, avatarData: string = '') => {
     if (!wallet?.publicKey || !wallet.signTransaction || !wallet.signMessage) throw new Error('Wallet not connected');
 
@@ -1357,21 +1357,35 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       }
       console.log('Using existing encryption keys for registration');
 
-      console.log('Creating register instruction for:', displayName);
-      const instruction = createRegisterInstruction(
+      // Generate session keypair upfront so we can bundle everything
+      const newSessionKeypair = Keypair.generate();
+      const validUntil = Math.floor(Date.now() / 1000) + 7 * 24 * 3600; // 7 days
+      const SESSION_FUND_LAMPORTS = Math.floor(0.05 * LAMPORTS_PER_SOL);
+
+      console.log('Creating register + session instructions for:', displayName);
+      const registerIx = createRegisterInstruction(
         wallet.publicKey,
         displayName,
         avatarData,
         encryptionKeys.publicKey
       );
+      const createSessionIx = createCreateSessionInstruction(
+        wallet.publicKey,
+        newSessionKeypair.publicKey,
+        validUntil
+      );
+      const fundSessionIx = SystemProgram.transfer({
+        fromPubkey: wallet.publicKey,
+        toPubkey: newSessionKeypair.publicKey,
+        lamports: SESSION_FUND_LAMPORTS,
+      });
 
-      console.log('Building transaction...');
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      console.log('Transaction built');
+      // ONE transaction, ONE wallet popup: register + create session + fund session
+      console.log('Building transaction (register + session + fund)...');
+      const transaction = await buildTransaction(connection, wallet.publicKey, [registerIx, createSessionIx, fundSessionIx]);
 
       console.log('Signing transaction with wallet...');
       const signedTransaction = await wallet.signTransaction(transaction);
-      console.log('Transaction signed');
 
       console.log('Sending transaction...');
       const txSignature = await connection.sendTransaction(signedTransaction);
@@ -1380,6 +1394,24 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       console.log('Confirming transaction...');
       await connection.confirmTransaction(txSignature, 'confirmed');
       console.log('Transaction confirmed!');
+
+      // Store session keypair in AsyncStorage
+      const storageKey = `@mukon_session_keypair_${wallet.publicKey.toBase58()}`;
+      await AsyncStorage.setItem(storageKey, JSON.stringify({
+        secretKey: Buffer.from(newSessionKeypair.secretKey).toString('base64'),
+        validUntil,
+      }));
+
+      // Set session state so the useEffect skips creating another one
+      setSessionKeypair(newSessionKeypair);
+      const sessionTokenPDA = getSessionTokenPDA(newSessionKeypair.publicKey);
+      sessionInfoRef.current = {
+        sessionKey: newSessionKeypair.publicKey,
+        walletPubkey: wallet.publicKey,
+        sessionTokenPDA,
+      };
+
+      console.log(`✅ Registered + session key created + funded with ${SESSION_FUND_LAMPORTS / LAMPORTS_PER_SOL} SOL`);
 
       setProfile({ displayName, publicKey: wallet.publicKey });
       setEncryptionReady(true);
