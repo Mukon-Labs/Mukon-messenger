@@ -13,6 +13,8 @@ Private, wallet-to-wallet encrypted messenger for Solana Privacy Hackathon (Jan 
 - Emoji avatars, reactions, replies
 - .sol/.skr domain resolution
 - Token-gated groups
+- QR code contact sharing
+- Push notifications
 
 ---
 
@@ -26,6 +28,11 @@ Private, wallet-to-wallet encrypted messenger for Solana Privacy Hackathon (Jan 
 **Backend URL:**
 - Configured in `app/src/config.ts`
 - Both dev and prod: https://backend-rough-bird-7310.fly.dev (deployed on Fly.io)
+
+**Team Workflow:**
+- Ryu (AI assistant) works on feature branches but cannot commit to main
+- Always cherry-pick from Ryu's branches — never merge directly (his branches revert backend changes, delete files, stack on each other)
+- Review every branch diff carefully before cherry-picking
 
 ---
 
@@ -50,10 +57,6 @@ await messenger.register('Name', '🦅'); // Re-register with new schema
 3. Lazy migration (auto-upgrade on write)
 4. Test migration path on devnet
 5. Remove/restrict `close_profile`
-
-**References:**
-- https://book.anchor-lang.com/anchor_references/account_types.html
-- https://github.com/metaplex-foundation/metaplex-program-library
 
 ---
 
@@ -97,10 +100,13 @@ This script:
 - Extracts 8-byte instruction discriminators
 - Auto-updates `app/src/utils/transactions.ts`
 
+**⚠️ PENDING:** `store_group_key_for_member` instruction was added to the program but has a **placeholder discriminator** (`0x00` x 8) in `transactions.ts`. Must rebuild program and run `update-discriminators.js` before this instruction will work.
+
 ### 5. Rebuild Client
 ```bash
 cd app
 npm run build  # or npm run build:clean if needed
+npm run build:prebuild  # if native deps changed (expo-camera, expo-notifications, etc.)
 ```
 
 ### 6. Test on Device
@@ -116,17 +122,26 @@ adb install -r app-debug.apk
 
 **Deployed:**
 - Solana program: `54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy` (devnet)
-- Backend: Fly.io (https://backend-rough-bird-7310.fly.dev) - Consistent URL for dev and prod
+- Backend: Fly.io (https://backend-rough-bird-7310.fly.dev) — 2 machines, SIN region
 - Database: Fly.io Postgres (`mukon-db`, SIN region, scales to 0 when idle)
 - Arcium MXE: `5EJeKvZL6dPFcNuVVUWctDzZLU16pJA4sucg3ysPXJdr` (cluster offset 456)
 
-**Recent Work (Feb 23 - Backend Persistence):**
+**Recent Work (Feb 23):**
 - ✅ **Fly.io Postgres**: Messages, read receipts, group avatars, pending key shares now persist across deploys
   - `backend/src/db.js` — connection pool, schema init, CRUD functions
   - `backend/src/index.js` — `store` abstraction with in-memory fallback when `DATABASE_URL` not set
   - 6 tables: messages, group_messages, read_receipts, group_read_receipts, group_avatars, pending_key_shares
   - `onlineUsers` and `groupRooms` remain in-memory (ephemeral connection state)
   - `/health` endpoint reports database connectivity status
+- ✅ **Cherry-picked from Ryu's branches:**
+  - Wallet session persistence with `reauthorize()` fallback (fixes Known Issue #6)
+  - Socket.IO reconnection with exponential backoff + room rejoin
+  - Local push notifications via `expo-notifications`
+  - `store_group_key_for_member` program instruction (needs discriminator update)
+  - `ConnectionStatus` tracking in MessengerContext
+  - QR code display/scanner screens
+  - Read receipts toggle in Settings
+  - Added deps: `pg`, `expo-notifications`, `expo-camera`, `react-native-qrcode-svg`
 
 **Previous Work (Feb 4 - Architecture Pivot):**
 - ✅ **Per-Relationship PDAs**: Replaced WalletDescriptor (Vec<Peer>) with individual Relationship PDAs
@@ -135,13 +150,7 @@ adb install -r app-debug.apk
   - O(1) lookup via PDA derivation
   - Status per side: 0=Empty, 1=Invited, 2=Requested, 3=Accepted, 4=Rejected, 5=Blocked
 - ✅ **Arcium v0.7.0**: Upgraded from v0.6.2, deployed 3 live comp defs
-  - `is_mutual_contact` (~30K gates) — replaces `is_accepted_contact` (was 1.17B ACUs, over limit)
-  - `count_accepted` (507M ACUs)
-  - `add_two_numbers` (473M ACUs)
 - ✅ **Client updated**: loadContacts uses getProgramAccounts with memcmp filters
-  - All 5 DM instruction builders updated for Relationship PDA model
-  - Added `close_wallet_descriptor` for legacy account cleanup
-- ✅ **UNTESTED**: Needs full E2E testing on device before push
 
 **Previous Work (Feb 3):**
 - ✅ **Light Protocol V2**: Complete production-ready implementation (disabled on devnet)
@@ -150,10 +159,13 @@ adb install -r app-debug.apk
 **Previous Work (Feb 1):**
 - ✅ Build system, invite cancellation, real-time sync, Fly.io backend
 
-**Working Features:**
+---
+
+## Working Features
 
 **DMs:**
 - ✅ Wallet connection (Solana Mobile Wallet Adapter)
+- ✅ Wallet session persistence (reauthorize on app restart)
 - ✅ User registration with encryption public key
 - ✅ Contact invitations (invite before target registers)
 - ✅ E2E encrypted messaging (NaCl box)
@@ -165,9 +177,10 @@ adb install -r app-debug.apk
 - ✅ Message reactions (❤️ 🔥 💯 😂 👍 👎)
 - ✅ Reply to messages
 - ✅ Copy message to clipboard
-- ✅ Real-time delivery (Socket.IO)
+- ✅ Real-time delivery (Socket.IO with reconnection + exponential backoff)
 - ✅ Message persistence (Fly.io Postgres)
 - ✅ Duplicate detection
+- ✅ Push notifications (local, via expo-notifications)
 
 **Profile & Contacts:**
 - ✅ Emoji avatars (200+ curated emojis)
@@ -177,6 +190,8 @@ adb install -r app-debug.apk
 - ✅ .sol/.skr domain resolution (SNS)
 - ✅ Custom contact names (local AsyncStorage)
 - ✅ Name priority: Custom > Domain > On-chain > Pubkey
+- ✅ QR code display (share wallet address)
+- ✅ QR code scanner (scan to add contact)
 
 **Groups:**
 - ✅ Create groups (up to 30 members)
@@ -189,44 +204,37 @@ adb install -r app-debug.apk
 - ✅ Group rename (admin only, on-chain via updateGroup)
 - ✅ Group emoji avatars (local AsyncStorage, shown in info/header/list)
 - ✅ **On-chain encrypted key backup** - Hybrid storage (AsyncStorage + on-chain) allows key recovery after clearing app data. KEY DIFFERENTIATOR vs WhatsApp/Signal.
+- ✅ `store_group_key_for_member` — inviter can store keys for invitees on-chain (needs program redeploy)
 
 **UI/UX:**
 - ✅ Telegram-style drawer navigation
-- ✅ Settings screen
+- ✅ Settings screen with read receipts toggle
 - ✅ Three-tier build system (build / clean / prebuild)
 - ✅ SVG crypto wallpaper (wallet, key, shield, chain, coin, hex, Solana swoosh)
-- ✅ react-native-svg installed (requires native rebuild via build:prebuild)
+- ✅ Connection status tracking (disconnected / connecting / connected / reconnecting)
 
-**Known Issues (For Hackathon):**
-1. 🟡 **Light Protocol ZK Compression** - V2 architecture complete but disabled on devnet due to infrastructure
+---
+
+## Known Issues
+
+**Active:**
+1. 🟡 **Light Protocol ZK Compression** — V2 architecture complete but disabled on devnet
    - Devnet Light System Program panics during verify_proof
-   - This is a devnet indexer limitation, not a code issue
    - Architecture production-ready for mainnet deployment
    - `USE_ZK_COMPRESSION = false` in MessengerContext
-2. 🐛 **Unread message badges not incrementing** - Needs two-device testing with physical devices
-3. 🐛 **Read ticks not showing** - Backend emits `messages_read` but needs two-device testing
-4. 🐛 **Emulator socket instability** - Android emulator has persistent "xhr post error" socket issues. Use physical devices for testing.
-5. 🔧 **Double wallet signature on group creation** - Two transactions: (1) create+invite, (2) store key. Can combine into one.
+2. 🐛 **Unread message badges not incrementing** — Needs two-device testing with physical devices
+3. 🐛 **Read ticks not showing** — Backend emits `messages_read` but needs two-device testing
+4. 🐛 **Emulator socket instability** — Use physical devices for testing
+5. 🔧 **Double wallet signature on group creation** — Two transactions: (1) create+invite, (2) store key. Can combine into one.
+6. 🔧 **`store_group_key_for_member` discriminator** — Placeholder `0x00` bytes, needs program rebuild + `update-discriminators.js`
+7. **Domain resolution** — Needs mainnet testing with real .sol/.skr domains
+8. **Group key rotation** — Only rotates on kick (security debt)
+9. **All Alert.alert popups still white** — Need to replace 87 Alert.alert calls with DarkAlert component (9 files)
 
-**Known Issues (Lower Priority):**
-6. **Wallet persistence** - Closing app requires full reconnect
-7. ~~**Backend persistence**~~ - FIXED: Now using Fly.io Postgres. Data survives deploys.
-8. **Domain resolution** - Needs mainnet testing with real .sol/.skr domains
-9. **Group key rotation** - Only rotates on kick (security debt)
-10. **All Alert.alert popups still white** - Need to replace 87 Alert.alert calls with DarkAlert component (9 files)
-
-**Next Steps (Feb 4):**
-1. 🔥 **TEST ARCHITECTURE PIVOT** — E2E test on device
-   - DM invite/accept/reject/block/unblock with Relationship PDAs
-   - Group creation still works (unchanged)
-   - loadContacts via getProgramAccounts returns contacts
-   - Old WalletDescriptor users can close and re-register
-2. 🔜 **Post-Testing**
-   - Push to remote once tested
-   - Fix any bugs found during testing
-   - Demo video recording
-
-**Detailed fix history:** See CHANGELOG.md
+**Fixed:**
+- ~~**Wallet persistence**~~ — FIXED: `reauthorize()` with fallback, `isRestoring` state
+- ~~**Backend persistence**~~ — FIXED: Fly.io Postgres, data survives deploys
+- ~~**Socket reconnection**~~ — FIXED: Exponential backoff, room rejoin on reconnect
 
 ---
 
@@ -245,11 +253,14 @@ A 1:1 encrypted messenger where:
 
 ### Current (MVP)
 ```
-CLIENT (React Native)
+CLIENT (React Native + Expo)
   ├── Solana Mobile Wallet Adapter (MWA)
   ├── E2E encryption (NaCl box - asymmetric for DMs)
   ├── Group encryption (NaCl secretbox - symmetric)
   ├── MessengerContext (centralized socket/state)
+  ├── WalletContext (session persistence + reauthorize)
+  ├── Push notifications (expo-notifications, local)
+  ├── QR codes (expo-camera + react-native-qrcode-svg)
   └── Chat UI
 
 SOLANA PROGRAM (Anchor + Arcium v0.7.0)
@@ -264,18 +275,15 @@ SOLANA PROGRAM (Anchor + Arcium v0.7.0)
   ├── GroupKeyShare (encrypted group key backup per member)
   └── WalletDescriptor (LEGACY — close_wallet_descriptor to reclaim rent)
 
-  Instructions:
-  ├── register() - Create profile (no wallet descriptor)
-  ├── invite/accept/reject() - Contact management via Relationship PDA
-  ├── block/unblock() - Harassment prevention via Relationship PDA
-  ├── close_wallet_descriptor() - Reclaim rent from legacy accounts
-  ├── create_group() - Create group
-  ├── invite_to_group() - Any member can invite
-  ├── accept_group_invite() - Join group (checks token gate)
-  ├── leave_group/kick_member() - Group management
-  ├── store_group_key() - Store encrypted group key on-chain for recovery
-  ├── close_group_key() - Close key share account and recover rent
-  └── update_profile/update_group/close_profile()
+  Instructions (18):
+  ├── register / update_profile / close_profile
+  ├── invite / accept / reject / block / unblock
+  ├── close_wallet_descriptor (legacy cleanup)
+  ├── create_group / update_group / close_group
+  ├── invite_to_group / accept_group_invite / reject_group_invite
+  ├── leave_group / kick_member
+  ├── store_group_key / store_group_key_for_member / close_group_key
+  └── (Light Protocol compressed variants — disabled on devnet)
 
 MESSAGE BACKEND (WebSocket + Postgres)
   ├── Socket.IO for real-time delivery
@@ -298,26 +306,13 @@ LAYER 2: OFF-CHAIN (Relay)
   ├── Encrypted message blob (can't read)
   ├── Destination: [ENCRYPTED or anonymous ID]
   └── Timestamp (ordering only)
-  → Relay can't see sender/recipient or correlate conversations
 
 LAYER 1: ON-CHAIN (Arcium MPC)
   ├── Contact lists (encrypted)
   ├── Conversation existence (encrypted)
-  ├── Message pointers (encrypted)
   ├── User profiles (encrypted)
   └── Social graph (encrypted)
-  → Even developers can't see who talks to whom
-  → MPC proves relationships without revealing data
 ```
-
-**Privacy Goals:**
-- 🔒 Message content encrypted (NaCl E2E)
-- 🔒 Contact lists encrypted (Arcium MPC)
-- 🔒 Social graph encrypted (Arcium MPC)
-- 🔒 Conversation metadata encrypted (Arcium MPC)
-- 🔒 Message routing anonymized
-- 🔒 Relay nodes can't correlate conversations
-- 🔒 On-chain observers can't map social networks
 
 ---
 
@@ -333,13 +328,19 @@ mukon-messenger/
 ├── app/                     # React Native client
 │   ├── src/
 │   │   ├── contexts/
-│   │   │   ├── MessengerContext.tsx  # Centralized state/socket
-│   │   │   └── WalletContext.tsx
+│   │   │   ├── MessengerContext.tsx  # Centralized state/socket/reconnection
+│   │   │   ├── WalletContext.tsx     # MWA + session persistence
+│   │   │   ├── CallContext.tsx       # Voice call state (UI only)
+│   │   │   └── AlertContext.tsx      # Dark alert provider
 │   │   ├── screens/
+│   │   │   ├── QRCodeDisplayScreen.tsx  # Show wallet as QR
+│   │   │   ├── QRScannerScreen.tsx      # Scan QR to add contact
+│   │   │   └── ...
 │   │   ├── components/
 │   │   ├── utils/
-│   │   │   ├── transactions.ts  # Manual tx builders
+│   │   │   ├── transactions.ts  # Manual tx builders + discriminators
 │   │   │   ├── encryption.ts
+│   │   │   ├── notifications.ts # Push notification helpers
 │   │   │   └── domains.ts
 │   │   └── config.ts        # Backend URL config
 │   └── package.json
@@ -352,7 +353,6 @@ mukon-messenger/
 │   └── init-comp-defs.ts    # Initialize Arcium comp defs
 ├── build/                   # Compiled Arcium circuits (.arcis)
 ├── .dev/                    # Development docs
-│   ├── CLAUDE.md            # This file
 │   ├── CHANGELOG.md
 │   ├── ARCIUM_INTEGRATION.md
 │   └── LIGHT_PROTOCOL_INTEGRATION.md
@@ -361,7 +361,7 @@ mukon-messenger/
 
 ---
 
-## 🚀 GROUP CHAT ARCHITECTURE
+## Group Chat Architecture
 
 ### Core Settings
 - **Group ID:** Pure random 32 bytes (maximum privacy)
@@ -376,32 +376,28 @@ mukon-messenger/
 - User passes token account, program verifies `amount >= min_balance`
 - NFT gating is post-MVP
 
-### Solana Program Instructions
+### Group Encryption Model
 
-```
-DM Instructions (9):
-├── register(display_name, avatar_data, encryption_pubkey)
-├── update_profile(display_name, avatar_data, encryption_pubkey)
-├── invite(hash) — creates Relationship PDA + Conversation PDA
-├── accept() — sets both statuses to Accepted
-├── reject() — sets both statuses to Rejected
-├── block() — sets both statuses to Blocked
-├── unblock() — sets Blocked → Rejected (allows re-invite)
-├── close_profile()
-└── close_wallet_descriptor() — legacy cleanup
+Messages NOT stored on-chain. Shared secret encryption:
 
-Group Instructions (8):
-├── create_group(group_id, name, encryption_pubkey, token_gate?)
-├── update_group(group_id, name?, token_gate?)
-├── invite_to_group(group_id, invitee) — any member can invite
-├── accept_group_invite(group_id) — checks token gate
-├── reject_group_invite(group_id)
-├── leave_group(group_id)
-├── kick_member(group_id, member) — creator only
-└── close_group(group_id) — creator only
-```
+1. **Create Group:** Creator generates random 32-byte `group_secret`, stores locally
+2. **Invite Member:** Admin encrypts `group_secret` with invitee's pubkey (NaCl box), sends via Socket.IO
+3. **Send Message:** Sender encrypts with `group_secret` (NaCl secretbox), backend broadcasts
+4. **Receive Message:** All members decrypt with same `group_secret`
+5. **Kick Member (Future):** Rotate `group_secret`, redistribute to remaining members
 
-### Account Structures
+### Arcium MPC Integration (v0.7.0)
+
+Arcium encrypts on-chain state via multi-party computation:
+- `is_mutual_contact` — verify both sides of a Relationship are Accepted (~30K gates)
+- `count_accepted` — count accepted contacts privately (507M ACUs)
+- `add_two_numbers` — demo/testing circuit (473M ACUs)
+
+All 3 comp defs LIVE on devnet. See `.dev/ARCIUM_INTEGRATION.md` for details.
+
+---
+
+## Account Structures
 
 ```rust
 #[account]
@@ -437,58 +433,13 @@ pub struct Group {
 }
 
 #[account]
-pub struct GroupInvite {
+pub struct GroupKeyShare {
     pub group_id: [u8; 32],
-    pub inviter: Pubkey,
-    pub invitee: Pubkey,
-    pub status: GroupInviteStatus,
-    pub created_at: i64,
-}
-
-// LEGACY — kept for deserialization of existing on-chain accounts
-#[account]
-pub struct WalletDescriptor {
-    pub owner: Pubkey,
-    pub peers: Vec<Peer>,    // Use close_wallet_descriptor to reclaim rent
+    pub member: Pubkey,
+    pub encrypted_key: Vec<u8>,      // NaCl box encrypted
+    pub nonce: [u8; 24],
 }
 ```
-
-### Group Encryption Model
-
-Messages NOT stored on-chain. Shared secret encryption:
-
-1. **Create Group:** Creator generates random 32-byte `group_secret`, stores locally
-2. **Invite Member:** Admin encrypts `group_secret` with invitee's pubkey (NaCl box), sends via Socket.IO
-3. **Send Message:** Sender encrypts with `group_secret` (NaCl secretbox), backend broadcasts
-4. **Receive Message:** All members decrypt with same `group_secret`
-5. **Kick Member (Future):** Rotate `group_secret`, redistribute to remaining members
-
-### Backend Socket.IO Events
-
-```typescript
-// Client → Server
-'join_group_room': { groupId }
-'leave_group_room': { groupId }
-'group_message': { groupId, encryptedContent, nonce }
-'group_key_share': { groupId, recipientPubkey, encryptedKey, nonce }
-'request_group_key': { groupId }
-
-// Server → Client
-'group_message': { groupId, senderPubkey, encryptedContent, nonce, timestamp }
-'group_member_joined': { groupId, memberPubkey }
-'group_member_left': { groupId, memberPubkey }
-'group_member_kicked': { groupId, memberPubkey }
-'group_key_shared': { groupId, senderPubkey, encryptedKey, nonce }
-```
-
-### Arcium MPC Integration (v0.7.0)
-
-Arcium encrypts on-chain state via multi-party computation:
-- `is_mutual_contact` — verify both sides of a Relationship are Accepted (~30K gates)
-- `count_accepted` — count accepted contacts privately (507M ACUs)
-- `add_two_numbers` — demo/testing circuit (473M ACUs)
-
-All 3 comp defs LIVE on devnet. See `.dev/ARCIUM_INTEGRATION.md` for details.
 
 ---
 
@@ -499,47 +450,6 @@ The `invite` instruction creates a Relationship PDA with `init`:
 - If invitee hasn't registered yet, the Relationship PDA still exists on-chain
 - When invitee registers and loads contacts via `getProgramAccounts`, they see pending invitations
 - No WalletDescriptor needed — each relationship is its own account
-
-**Implementation:** `programs/mukon-messenger/src/lib.rs` invite instruction
-
----
-
-## Known UX Issue: Double Wallet Sign on Group Creation
-
-**Problem:** Creating a group requires **2 wallet signatures**:
-1. Create group + invite members (transaction 1)
-2. Store admin's encrypted group key on-chain (transaction 2)
-
-**Why it happens:** The `createGroupWithMembers` function in `MessengerContext.tsx` sends two separate transactions for safety, but this creates a poor UX.
-
-**Solution (Easy Fix):**
-Combine both into ONE transaction by adding `createStoreGroupKeyInstruction` to the initial instructions array:
-
-```typescript
-// Current (2 transactions):
-const instructions = [
-  createCreateGroupInstruction(...),
-  ...invitees.map(invitee => createInviteToGroupInstruction(...))
-];
-const transaction = await buildTransaction(connection, wallet.publicKey, instructions);
-// Sign #1 ^^
-
-// Later...
-const storeKeyIx = createStoreGroupKeyInstruction(...);
-const storeKeyTx = await buildTransaction(connection, wallet.publicKey, [storeKeyIx]);
-// Sign #2 ^^
-
-// FIXED (1 transaction):
-const instructions = [
-  createCreateGroupInstruction(...),
-  ...invitees.map(invitee => createInviteToGroupInstruction(...)),
-  createStoreGroupKeyInstruction(...)  // Add here!
-];
-const transaction = await buildTransaction(connection, wallet.publicKey, instructions);
-// Only 1 sign! ^^
-```
-
-**File:** `app/src/contexts/MessengerContext.tsx` around line 1384-1438
 
 ---
 
@@ -565,12 +475,33 @@ const transaction = await buildTransaction(connection, wallet.publicKey, instruc
 - No duplicate messages
 - No constant wallet prompts
 - Messages persist after leaving/re-entering chat
+- Messages persist after backend redeploy
 
 ### Performance Expectations
 - Registration: ~2-3s (on-chain tx)
 - Invitation/Accept: ~2-3s (on-chain tx)
 - Message send: <100ms (WebSocket)
 - Message receive: Real-time (<50ms)
+
+---
+
+## Ryu's Unmerged Branch Audit (Feb 23)
+
+Branches reviewed and cherry-picked where useful. Remaining branches with **incomplete** features — do NOT merge:
+
+| Branch | Feature | Status | Why Skipped |
+|--------|---------|--------|-------------|
+| `fix/version-migration` | Account version migration | Duplicate | 0 unique commits vs backend-reconnection |
+| `feat/qr-codes` | QR codes | Duplicate | 0 unique commits vs version-migration |
+| `feat/message-expiration` | Message expiry + search | Incomplete | `searchMessages()` never implemented; expiry has APIs but no UI |
+| `feat/iq-labs-integration` | IQ Labs SDK | Docs only | 423 lines of docs, zero implementation code, unused npm dep |
+| `feat/escrow-deals` | Escrow/OTC deals | Dangerous | DealCard UI accepts deals but `// TODO: Add Solana transaction handling` — never transfers tokens |
+
+**Common issue across all Ryu branches:**
+- All branched from `f807e4a` (before voice calls + Postgres)
+- All delete `backend/src/db.js` and revert backend to in-memory
+- All delete voice call files (branched before those commits)
+- All stacked on each other — can't merge independently
 
 ---
 
@@ -591,31 +522,13 @@ const transaction = await buildTransaction(connection, wallet.publicKey, instruc
 
 ---
 
-## Hackathon Submission Checklist
+## Production Checklist
 
-**CRITICAL:**
-- [ ] **Remove CLAUDE.md** from submission branch (or .gitignore it)
-- [ ] Keep it locally for post-hackathon development
-
-**Architecture Decisions:**
-- ✅ STEM Proto: Won't mention in public docs (code is substantially original)
-- ✅ Contact Management: Delete + Block implemented
-
-**Production Launch:**
-- 🚀 **GOING TO MAINNET** around hackathon submission
-- 🎯 **Backend:** Deploy to Fly.io (WebSocket support, edge deployment, low latency)
-- 📝 See PRODUCTION_DEPLOY.md
-
-**Deployment Timeline:**
-1. ✅ Week 1 (Jan 20-26): Core messenger MVP (DMs, groups, encryption)
-2. 🔄 Week 2 (Jan 27-30): Arcium integration, UI polish, deploy to Fly.io/mainnet, submit hackathon
-3. ✅ Week 3+ (Feb): Persistence (Postgres), monitoring, launch on Solana Mobile dApp Store
-
-**Before mainnet:**
 - [x] Deploy backend to Fly.io
+- [x] Add message persistence (Fly.io Postgres)
 - [ ] Make backend URL configurable (dev vs prod)
 - [ ] Deploy program to mainnet-beta
-- [x] Add message persistence (Fly.io Postgres)
+- [ ] Update `store_group_key_for_member` discriminator (rebuild program + run update-discriminators.js)
 - [ ] Add monitoring (Sentry, UptimeRobot)
 - [ ] Test extensively on mainnet
 

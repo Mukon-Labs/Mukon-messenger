@@ -287,6 +287,52 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     persistReadTimestamps();
   }, [readTimestamps, wallet?.publicKey]);
 
+  // ========== LOCAL-FIRST MESSAGE PERSISTENCE ==========
+  // Messages stored locally on device (AsyncStorage) — app works offline, full history available
+  // Backend is a temporary delivery buffer — messages deleted after client acknowledges receipt
+
+  const saveLocalMessages = useCallback(async (walletAddress: string, conversationId: string, msgs: any[]) => {
+    try {
+      await AsyncStorage.setItem(
+        `@mukon_messages_${walletAddress}_${conversationId}`,
+        JSON.stringify(msgs)
+      );
+    } catch (error) {
+      console.error('Failed to save local messages:', error);
+    }
+  }, []);
+
+  const loadLocalMessages = useCallback(async (walletAddress: string, conversationId: string): Promise<any[]> => {
+    try {
+      const stored = await AsyncStorage.getItem(`@mukon_messages_${walletAddress}_${conversationId}`);
+      return stored ? JSON.parse(stored) : [];
+    } catch (error) {
+      console.error('Failed to load local messages:', error);
+      return [];
+    }
+  }, []);
+
+  const saveLocalGroupMessages = useCallback(async (walletAddress: string, groupId: string, msgs: any[]) => {
+    try {
+      await AsyncStorage.setItem(
+        `@mukon_group_messages_${walletAddress}_${groupId}`,
+        JSON.stringify(msgs)
+      );
+    } catch (error) {
+      console.error('Failed to save local group messages:', error);
+    }
+  }, []);
+
+  const loadLocalGroupMessages = useCallback(async (walletAddress: string, groupId: string): Promise<any[]> => {
+    try {
+      const stored = await AsyncStorage.getItem(`@mukon_group_messages_${walletAddress}_${groupId}`);
+      return stored ? JSON.parse(stored) : [];
+    } catch (error) {
+      console.error('Failed to load local group messages:', error);
+      return [];
+    }
+  }, []);
+
   // Load cached profile immediately on mount to prevent showing register screen (Fix: wallet persistence)
   useEffect(() => {
     if (!wallet?.publicKey) return;
@@ -446,23 +492,17 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   // Initialize socket connection (ONE instance for entire app)
   useEffect(() => {
     if (!wallet?.publicKey) return;
+    if (!encryptionReady) return; // Gate on encryption readiness
 
     console.log('🔌 Connecting to backend:', BACKEND_URL);
 
-    // Test basic HTTP connectivity first
-    fetch(`${BACKEND_URL}/health`)
-      .then(res => res.json())
-      .then(data => console.log('✅ Backend HTTP reachable:', data))
-      .catch(err => console.error('❌ Backend HTTP unreachable:', err.message));
-
     const newSocket = io(BACKEND_URL, {
       path: '/socket.io',
-      transports: ['polling', 'websocket'], // Try polling first (works on restricted networks)
-      reconnectionAttempts: 10,
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 30000,
-      timeout: 30000, // Increase timeout for physical device
-      forceNew: true,
+      timeout: 20000,
       autoConnect: true,
     });
 
@@ -505,6 +545,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     // Resync missed messages and rejoin rooms after reconnection
     const resyncAfterReconnect = async () => {
       if (!wallet?.publicKey) return;
+      if (!newSocket.connected) return; // Guard: only resync when actually connected
 
       console.log('🔄 Re-syncing after reconnect...');
 
@@ -534,6 +575,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       console.log('✅ Connected to backend via', newSocket.io.engine.transport.name);
       setConnectionStatus('connected');
       await authenticateSocket();
+      // Resync rooms on reconnect (connect fires for both initial + reconnections)
+      await resyncAfterReconnect();
     });
 
     newSocket.on('connect_error', (error) => {
@@ -543,22 +586,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     newSocket.on('disconnect', (reason) => {
       console.log('⚠️  Disconnected from backend:', reason);
-      if (reason === 'io server disconnect') {
-        setConnectionStatus('disconnected');
-      }
+      setConnectionStatus('disconnected');
     });
 
     // Handle reconnection
     newSocket.io.on('reconnect_attempt', (attemptNumber) => {
       console.log(`🔄 Reconnection attempt ${attemptNumber}...`);
       setConnectionStatus('reconnecting');
-    });
-
-    newSocket.io.on('reconnect', async () => {
-      console.log('✅ Reconnected to backend');
-      setConnectionStatus('connected');
-      await authenticateSocket();
-      await resyncAfterReconnect();
     });
 
     newSocket.io.on('reconnect_failed', () => {
@@ -582,6 +616,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     newSocket.on('new_message', (message: any) => {
       console.log('Received new_message event:', message);
       if (message.conversationId) {
+        let wasNew = false;
         setMessages((prev) => {
           const updated = new Map(prev);
           const conversationMessages = updated.get(message.conversationId) || [];
@@ -600,7 +635,20 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           );
 
           if (!exists) {
-            updated.set(message.conversationId, [...conversationMessages, message]);
+            const newMessages = [...conversationMessages, message];
+            updated.set(message.conversationId, newMessages);
+            wasNew = true;
+
+            // Persist locally (fire and forget)
+            if (wallet?.publicKey) {
+              saveLocalMessages(wallet.publicKey.toBase58(), message.conversationId, newMessages);
+            }
+
+            // Acknowledge delivery so backend can clean up
+            newSocket.emit('messages_delivered', {
+              conversationId: message.conversationId,
+              messageIds: [message.id],
+            });
 
             // Increment unread count if not from current user and not in active conversation (Fix 7)
             const currentActiveConv = activeConversationRef.current;
@@ -641,7 +689,14 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       setMessages((prev) => {
         const updated = new Map(prev);
         const conversationMessages = updated.get(conversationId) || [];
-        updated.set(conversationId, conversationMessages.filter(m => m.id !== messageId));
+        const filtered = conversationMessages.filter(m => m.id !== messageId);
+        updated.set(conversationId, filtered);
+
+        // Persist deletion locally
+        if (wallet?.publicKey) {
+          saveLocalMessages(wallet.publicKey.toBase58(), conversationId, filtered);
+        }
+
         return updated;
       });
     });
@@ -729,7 +784,19 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           );
 
           if (!exists) {
-            updated.set(message.groupId, [...groupMsgs, message]);
+            const newMessages = [...groupMsgs, message];
+            updated.set(message.groupId, newMessages);
+
+            // Persist locally (fire and forget)
+            if (wallet?.publicKey) {
+              saveLocalGroupMessages(wallet.publicKey.toBase58(), message.groupId, newMessages);
+            }
+
+            // Acknowledge delivery so backend can clean up
+            newSocket.emit('group_messages_delivered', {
+              groupId: message.groupId,
+              messageIds: [message.id],
+            });
 
             // Increment unread if not from self and not viewing this group
             const currentActiveGroup = activeGroupRoomRef.current;
@@ -1006,7 +1073,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       newSocket.disconnect();
       setConnectionStatus('disconnected');
     };
-  }, [wallet?.publicKey]);
+  }, [wallet?.publicKey, encryptionReady]);
 
   // Auto-join all group rooms on connect so we can respond to group_key_needed requests
   // This ensures members can share keys even when not actively viewing the chat
@@ -1352,23 +1419,27 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       console.log('✅ Encrypted message sent via socket');
 
-      // Optimistic update
+      // Optimistic update + persist locally
+      const optimisticMsg = {
+        id: `temp-${timestamp}`,
+        conversationId,
+        sender: wallet.publicKey!.toBase58(),
+        content,
+        encrypted: encryptedBase64,
+        nonce: nonceBase64,
+        timestamp,
+        status: 'sending',
+      };
+
       setMessages((prev) => {
         const updated = new Map(prev);
         const conversationMessages = updated.get(conversationId) || [];
-        updated.set(conversationId, [
-          ...conversationMessages,
-          {
-            id: `temp-${timestamp}`,
-            conversationId,
-            sender: wallet.publicKey!.toBase58(),
-            content,
-            encrypted: encryptedBase64,
-            nonce: nonceBase64,
-            timestamp,
-            status: 'sending', // Feature 5: Read receipts
-          },
-        ]);
+        const newMessages = [...conversationMessages, optimisticMsg];
+        updated.set(conversationId, newMessages);
+
+        // Persist locally
+        saveLocalMessages(wallet.publicKey!.toBase58(), conversationId, newMessages);
+
         return updated;
       });
     } catch (error) {
@@ -1476,9 +1547,21 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
   const loadConversationMessages = async (conversationId: string) => {
     if (!wallet?.publicKey) return;
+    const walletAddress = wallet.publicKey.toBase58();
 
+    // Step 1: Load from local cache immediately (instant, works offline)
+    const localMessages = await loadLocalMessages(walletAddress, conversationId);
+    if (localMessages.length > 0) {
+      console.log(`📱 Loaded ${localMessages.length} messages from local cache`);
+      setMessages((prev) => {
+        const updated = new Map(prev);
+        updated.set(conversationId, localMessages);
+        return updated;
+      });
+    }
+
+    // Step 2: Fetch from backend to get any messages received while offline
     try {
-      // Use cached encryption signature (no popup!)
       const encryptionSig = (window as any).__mukonEncryptionSignature;
       if (!encryptionSig) {
         console.error('No encryption signature available');
@@ -1486,7 +1569,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       }
 
       const signatureB58 = bs58.encode(encryptionSig);
-      const url = `${BACKEND_URL}/messages/${conversationId}?sender=${wallet.publicKey.toBase58()}&signature=${encodeURIComponent(signatureB58)}`;
+      const url = `${BACKEND_URL}/messages/${conversationId}?sender=${walletAddress}&signature=${encodeURIComponent(signatureB58)}&acknowledge=true`;
       const response = await fetch(url);
 
       if (!response.ok) {
@@ -1496,40 +1579,51 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       const data = await response.json();
       console.log(`📜 Loaded ${data.messages.length} messages from backend`);
 
-      // Parse persisted read timestamps (Fix: persistent read ticks)
+      // Parse persisted read timestamps
       const persistedReadTimestamps = new Map<string, number>();
       if (data.readTimestamps && Array.isArray(data.readTimestamps)) {
         data.readTimestamps.forEach((entry: { pubkey: string; timestamp: number }) => {
           persistedReadTimestamps.set(entry.pubkey, entry.timestamp);
         });
-        console.log(`📗 Loaded ${data.readTimestamps.length} persisted read receipts for conversation`);
       }
 
+      // Step 3: Merge local + backend, deduplicate by message ID
       setMessages((prev) => {
         const updated = new Map(prev);
-        const backendMessages = data.messages;
+        const currentMessages = updated.get(conversationId) || [];
+
+        // Build a set of existing message IDs for deduplication
+        const existingIds = new Set(currentMessages.map((m: any) => m.id));
+
+        // Add backend messages that aren't already local
+        const newFromBackend = data.messages.filter((m: any) => !existingIds.has(m.id));
 
         // Apply read status based on persisted timestamps
-        const merged = backendMessages.map(msg => {
-          // For messages I sent
-          if (msg.sender === wallet?.publicKey?.toBase58()) {
-            // Check if other person read it based on persisted timestamp
+        const applyReadStatus = (msg: any) => {
+          if (msg.sender === walletAddress) {
             const otherPersonTimestamp = Array.from(persistedReadTimestamps.entries())
-              .find(([pubkey]) => pubkey !== wallet?.publicKey?.toBase58())?.[1];
-
+              .find(([pubkey]) => pubkey !== walletAddress)?.[1];
             if (otherPersonTimestamp && msg.timestamp <= otherPersonTimestamp) {
               return { ...msg, status: 'read' };
             }
-            return { ...msg, status: 'sent' };
+            return { ...msg, status: msg.status || 'sent' };
           }
           return msg;
-        });
+        };
+
+        const merged = [...currentMessages.map(applyReadStatus), ...newFromBackend.map(applyReadStatus)]
+          .sort((a, b) => a.timestamp - b.timestamp);
 
         updated.set(conversationId, merged);
+
+        // Persist merged result back to local storage
+        saveLocalMessages(walletAddress, conversationId, merged);
+
         return updated;
       });
     } catch (error) {
-      console.error('Failed to load conversation messages:', error);
+      console.error('Failed to load conversation messages from backend:', error);
+      // Graceful offline: local cache is already shown
     }
   };
 
@@ -2371,23 +2465,27 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       console.log('✅ Encrypted group message sent via socket');
 
-      // Optimistic update
+      // Optimistic update + persist locally
+      const optimisticMsg = {
+        id: `temp-${timestamp}`,
+        groupId,
+        sender: wallet.publicKey!.toBase58(),
+        content,
+        encrypted: encryptedBase64,
+        nonce: nonceBase64,
+        timestamp,
+        status: 'sending',
+      };
+
       setGroupMessages(prev => {
         const updated = new Map(prev);
         const msgs = updated.get(groupId) || [];
-        updated.set(groupId, [
-          ...msgs,
-          {
-            id: `temp-${timestamp}`,
-            groupId,
-            sender: wallet.publicKey!.toBase58(),
-            content,
-            encrypted: encryptedBase64,
-            nonce: nonceBase64,
-            timestamp,
-            status: 'sending', // Feature 5: Read receipts
-          },
-        ]);
+        const newMessages = [...msgs, optimisticMsg];
+        updated.set(groupId, newMessages);
+
+        // Persist locally
+        saveLocalGroupMessages(wallet.publicKey!.toBase58(), groupId, newMessages);
+
         return updated;
       });
     } catch (error) {
@@ -2562,7 +2660,20 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
   const loadGroupMessages = async (groupId: string) => {
     if (!wallet?.publicKey) return;
+    const walletAddress = wallet.publicKey.toBase58();
 
+    // Step 1: Load from local cache immediately (instant, works offline)
+    const localMessages = await loadLocalGroupMessages(walletAddress, groupId);
+    if (localMessages.length > 0) {
+      console.log(`📱 Loaded ${localMessages.length} group messages from local cache`);
+      setGroupMessages((prev) => {
+        const updated = new Map(prev);
+        updated.set(groupId, localMessages);
+        return updated;
+      });
+    }
+
+    // Step 2: Fetch from backend to get any messages received while offline
     try {
       const encryptionSig = (window as any).__mukonEncryptionSignature;
       if (!encryptionSig) {
@@ -2571,7 +2682,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       }
 
       const signatureB58 = bs58.encode(encryptionSig);
-      const url = `${BACKEND_URL}/group-messages/${groupId}?sender=${wallet.publicKey.toBase58()}&signature=${encodeURIComponent(signatureB58)}`;
+      const url = `${BACKEND_URL}/group-messages/${groupId}?sender=${walletAddress}&signature=${encodeURIComponent(signatureB58)}&acknowledge=true`;
       const response = await fetch(url);
 
       if (!response.ok) {
@@ -2581,44 +2692,55 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       const data = await response.json();
       console.log(`📜 Loaded ${data.messages.length} group messages from backend`);
 
-      // Parse persisted read timestamps (Fix: persistent read ticks)
+      // Parse persisted read timestamps
       const persistedReadTimestamps = new Map<string, number>();
       if (data.readTimestamps && Array.isArray(data.readTimestamps)) {
         data.readTimestamps.forEach((entry: { pubkey: string; timestamp: number }) => {
           persistedReadTimestamps.set(entry.pubkey, entry.timestamp);
         });
-        console.log(`📗 Loaded ${data.readTimestamps.length} persisted read receipts for group`);
       }
 
+      // Step 3: Merge local + backend, deduplicate by message ID
       setGroupMessages(prev => {
         const updated = new Map(prev);
-        const backendMessages = data.messages;
+        const currentMessages = updated.get(groupId) || [];
+
+        // Build a set of existing message IDs for deduplication
+        const existingIds = new Set(currentMessages.map((m: any) => m.id));
+
+        // Add backend messages that aren't already local
+        const newFromBackend = data.messages.filter((m: any) => !existingIds.has(m.id));
 
         // Apply read status based on persisted timestamps
-        const merged = backendMessages.map(msg => {
-          // For messages I sent
-          if (msg.sender === wallet?.publicKey?.toBase58()) {
-            // Check if ANY other member read it (use max timestamp)
+        const applyReadStatus = (msg: any) => {
+          if (msg.sender === walletAddress) {
             const maxReadTimestamp = Math.max(
               0,
               ...Array.from(persistedReadTimestamps.entries())
-                .filter(([pubkey]) => pubkey !== wallet?.publicKey?.toBase58())
+                .filter(([pubkey]) => pubkey !== walletAddress)
                 .map(([_, timestamp]) => timestamp)
             );
-
             if (maxReadTimestamp > 0 && msg.timestamp <= maxReadTimestamp) {
               return { ...msg, status: 'read' };
             }
-            return { ...msg, status: 'sent' };
+            return { ...msg, status: msg.status || 'sent' };
           }
           return msg;
-        });
+        };
+
+        const merged = [...currentMessages.map(applyReadStatus), ...newFromBackend.map(applyReadStatus)]
+          .sort((a, b) => a.timestamp - b.timestamp);
 
         updated.set(groupId, merged);
+
+        // Persist merged result back to local storage
+        saveLocalGroupMessages(walletAddress, groupId, merged);
+
         return updated;
       });
     } catch (error) {
-      console.error('Failed to load group messages:', error);
+      console.error('Failed to load group messages from backend:', error);
+      // Graceful offline: local cache is already shown
     }
   };
 

@@ -15,9 +15,8 @@ const io = new Server(httpServer, {
     methods: ['GET', 'POST']
   },
   transports: ['websocket', 'polling'],
-  allowEIO3: true,
   pingTimeout: 60000,
-  pingInterval: 25000
+  pingInterval: 25000,
 });
 
 app.use(cors());
@@ -180,6 +179,18 @@ const store = {
     return memPendingKeyShares.get(groupId)?.size || 0;
   },
 
+  async deleteMessages(conversationId, messageIds) {
+    for (const id of messageIds) {
+      await this.deleteMessage(conversationId, id);
+    }
+  },
+
+  async deleteGroupMessages(groupId, messageIds) {
+    for (const id of messageIds) {
+      await this.deleteGroupMessage(groupId, id);
+    }
+  },
+
   async deleteGroupData(groupId) {
     if (db.isEnabled()) {
       await db.deleteGroupData(groupId);
@@ -270,6 +281,17 @@ app.get('/messages/:conversationId', async (req, res) => {
       messages: conversationMessages,
       readTimestamps
     });
+
+    // If acknowledge=true, delete delivered messages from backend (local-first)
+    if (req.query.acknowledge === 'true' && conversationMessages.length > 0) {
+      try {
+        const ids = conversationMessages.map(m => m.id);
+        await store.deleteMessages(conversationId, ids);
+        console.log(`🗑️ Acknowledged & deleted ${ids.length} messages for ${conversationId.slice(0, 8)}...`);
+      } catch (err) {
+        console.error('Failed to delete acknowledged messages:', err);
+      }
+    }
   } catch (error) {
     console.error('Error fetching messages:', error);
     res.status(500).json({ error: error.message });
@@ -295,6 +317,17 @@ app.get('/group-messages/:groupId', async (req, res) => {
       messages: msgs,
       readTimestamps
     });
+
+    // If acknowledge=true, delete delivered messages from backend (local-first)
+    if (req.query.acknowledge === 'true' && msgs.length > 0) {
+      try {
+        const ids = msgs.map(m => m.id);
+        await store.deleteGroupMessages(groupId, ids);
+        console.log(`🗑️ Acknowledged & deleted ${ids.length} group messages for ${groupId.slice(0, 8)}...`);
+      } catch (err) {
+        console.error('Failed to delete acknowledged group messages:', err);
+      }
+    }
   } catch (error) {
     console.error('Error fetching group messages:', error);
     res.status(500).json({ error: error.message });
@@ -466,6 +499,27 @@ io.on('connection', (socket) => {
       readerPubkey,
       latestTimestamp,
     });
+  });
+
+  // Local-first: client acknowledges messages saved locally, backend can delete its copies
+  socket.on('messages_delivered', async ({ conversationId, messageIds }) => {
+    if (!socket.publicKey || !conversationId || !messageIds?.length) return;
+    try {
+      await store.deleteMessages(conversationId, messageIds);
+      console.log(`🗑️ Delivered & deleted ${messageIds.length} messages for ${conversationId.slice(0, 8)}...`);
+    } catch (err) {
+      console.error('Failed to delete delivered messages:', err);
+    }
+  });
+
+  socket.on('group_messages_delivered', async ({ groupId, messageIds }) => {
+    if (!socket.publicKey || !groupId || !messageIds?.length) return;
+    try {
+      await store.deleteGroupMessages(groupId, messageIds);
+      console.log(`🗑️ Delivered & deleted ${messageIds.length} group messages for ${groupId.slice(0, 8)}...`);
+    } catch (err) {
+      console.error('Failed to delete delivered group messages:', err);
+    }
   });
 
   socket.on('group_messages_read', async ({ groupId, readerPubkey, latestTimestamp }) => {
