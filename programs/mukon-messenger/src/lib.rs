@@ -748,10 +748,8 @@ pub mod mukon_messenger {
         let group = &ctx.accounts.group;
 
         // SECURITY: Only the group creator can store keys for other members
+        // Note: No member check — admin stores keys at invite time, before invitee accepts
         require!(group.creator == authority, ErrorCode::NotGroupAdmin);
-
-        // Verify target member is in the group
-        require!(group.members.contains(&member), ErrorCode::NotGroupMember);
 
         // Store the encrypted key share for the member
         key_share.group_id = group_id;

@@ -193,6 +193,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   // Session key state — allows auto-signing without wallet popups
   const [sessionKeypair, setSessionKeypair] = useState<Keypair | null>(null);
   const sessionInfoRef = useRef<SessionInfo | null>(null);
+  const sessionKeypairRef = useRef<Keypair | null>(null);
 
   // Refs for socket handlers to avoid stale closures (Fix 2b, 2d, Fix 7)
   const encryptionKeysRef = useRef<nacl.BoxKeyPair | null>(null);
@@ -209,6 +210,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   );
 
   // Keep refs in sync with state (Fix 2b, 2d)
+  useEffect(() => {
+    sessionKeypairRef.current = sessionKeypair;
+  }, [sessionKeypair]);
+
   useEffect(() => {
     encryptionKeysRef.current = encryptionKeys;
   }, [encryptionKeys]);
@@ -1014,17 +1019,14 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
             const adminNonce = nacl.randomBytes(nacl.box.nonceLength);
             const adminEncKey = nacl.box(newGroupSecret, adminNonce, currentEncKeys.publicKey, currentEncKeys.secretKey);
             const storeOwnIx = createStoreGroupKeyInstruction(wallet.publicKey!, groupIdBytes, adminEncKey, adminNonce, session);
-            const sessionKp = sessionKeypair;
+            const sessionKp = sessionKeypairRef.current;
             if (session && sessionKp) {
               const tx = await buildTransaction(connection, sessionKp.publicKey, [storeOwnIx]);
               tx.sign([sessionKp]);
               const sig = await connection.sendRawTransaction(tx.serialize());
               await connection.confirmTransaction(sig, 'confirmed');
-            } else if (wallet.signTransaction) {
-              const tx = await buildTransaction(connection, wallet.publicKey!, [storeOwnIx]);
-              const signed = await wallet.signTransaction(tx);
-              const sig = await connection.sendTransaction(signed);
-              await connection.confirmTransaction(sig, 'confirmed');
+            } else {
+              console.log('⏭️ No session key, skipping auto-rotation backup');
             }
 
             // Distribute to remaining members via socket
@@ -1214,18 +1216,19 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
                     session
                   );
 
-                  // Use session key for auto-signing (no wallet popup)
-                  const sessionKp = sessionKeypair;
-                  if (session && sessionKp) {
+                  // Use session key ref for auto-signing (avoids stale closure from socket handler)
+                  const sessionKp = sessionKeypairRef.current;
+                  const currentSession = sessionInfoRef.current;
+                  if (currentSession && sessionKp) {
                     const tx = await buildTransaction(connection, sessionKp.publicKey, [storeKeyIx]);
                     tx.sign([sessionKp]);
                     const sig = await connection.sendRawTransaction(tx.serialize());
                     await connection.confirmTransaction(sig, 'confirmed');
                   } else {
-                    const tx = await buildTransaction(connection, wallet!.publicKey!, [storeKeyIx]);
-                    const signedTx = await wallet!.signTransaction!(tx);
-                    const sig = await connection.sendTransaction(signedTx);
-                    await connection.confirmTransaction(sig, 'confirmed');
+                    // No session key available yet — skip to avoid wallet popup
+                    // Key is already stored locally, on-chain backup will happen on next opportunity
+                    console.log('⏭️ No session key yet, deferring on-chain backup');
+                    return;
                   }
 
                   await AsyncStorage.setItem(backupKey, 'true');
