@@ -1,13 +1,17 @@
 # Fly.io Deployment Guide
 
-## Current Setup
+## Current Setup (Updated Feb 25, 2026)
 
 **App**: `backend-rough-bird-7310`
 **URL**: https://backend-rough-bird-7310.fly.dev
 **Region**: Singapore (sin)
-**Machines**: 2 instances (high availability)
-**Memory**: 1GB per machine
-**Storage**: In-memory (Maps) - **NOT PERSISTENT**
+**Machines**: 1 instance (scaled down from 2 to fix WebSocket session affinity)
+**Memory**: 1GB
+**Storage**: Fly.io Postgres (`mukon-db`, SIN region, scales to 0 when idle)
+**Transport**: WebSocket-first (`['websocket', 'polling']`)
+**Architecture**: Local-first — backend is temporary delivery buffer, messages deleted after client acknowledges
+
+> **Note:** Most of this document was written pre-Postgres (Feb 23). Postgres is now LIVE with 6 tables: messages, group_messages, read_receipts, group_read_receipts, group_avatars, pending_key_shares. In-memory fallback still works when `DATABASE_URL` not set.
 
 ## Zero-Downtime Deployments
 

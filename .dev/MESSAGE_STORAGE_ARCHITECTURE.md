@@ -1,8 +1,16 @@
 # Message Storage Architecture
 
-## Current State (Hackathon MVP)
+> **STATUS (Feb 25, 2026):** Local-first architecture is NOW SHIPPED. See CHANGELOG.md for details.
+> - Tier 1 (Device/AsyncStorage): IMPLEMENTED — source of truth
+> - Tier 2 (Server/Postgres): IMPLEMENTED — temporary delivery buffer, cleaned after acknowledge
+> - Tier 3 (On-chain backup): IMPLEMENTED — GroupKeyShare PDAs for key recovery
+> - Keys: `@mukon_messages_${wallet}_${conversationId}`, `@mukon_group_messages_${wallet}_${groupId}`
+>
+> The rest of this document is the ORIGINAL design document from before implementation.
 
-**Where messages live:**
+## Original State (Pre Feb 23)
+
+**Where messages lived:**
 - ❌ NOT on-chain (too expensive, bad UX)
 - ❌ NOT on devices (no local storage implemented)
 - ✅ On backend server (Fly.io) in-memory only

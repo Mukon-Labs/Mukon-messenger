@@ -25,7 +25,8 @@ Mukon Messenger is a **truly private messaging app** where your wallet is your i
 - **Encrypted group chats** (NaCl secretbox with on-chain key backup)
 - **On-chain encrypted key recovery** - Unique feature! Your group keys are backed up encrypted on-chain, so clearing app data doesn't lock you out
 - **ZK Compression integration** - Light Protocol integration for reduced storage costs (foundation implemented)
-- **Contact lists encrypted with Arcium MPC v0.7.0** (3 circuits live on devnet, testing in progress)
+- **1-click session keys** - Sign once at login, all on-chain operations are automatic (no wallet popups)
+- **Contact lists encrypted with Arcium MPC v0.8.0** (3 circuits live on devnet)
 - **Social graph privacy** - No one can see who you're talking to
 - **Wallet-based identity** - Your Solana wallet is your account
 
@@ -72,7 +73,7 @@ adb install mukon-debug.apk
 # Backend URL is pre-configured: https://backend-rough-bird-7310.fly.dev
 ```
 
-**Note:** The backend is deployed on Fly.io with in-memory storage. Data resets on backend deployments, but on-chain data (profiles, contacts, groups) persists.
+**Note:** The backend is deployed on Fly.io with Postgres persistence. Messages are stored locally on your device (local-first architecture). On-chain data (profiles, contacts, groups, key backups) persists on Solana.
 
 ### Option B: Run Local Backend (Optional)
 
@@ -105,8 +106,10 @@ adb install mukon-debug.apk
 - **Contact Invitations** - Invite anyone by wallet address
 - **Invite Before Register** - Send invitations to wallets that haven't registered yet
 - **Contact Management** - Accept, reject, block, delete contacts
-- **Real-time Delivery** - Socket.IO with wallet signature authentication
-- **Message Persistence** - Messages stored off-chain, encrypted blobs only
+- **Real-time Delivery** - Socket.IO (WebSocket-first) with wallet signature authentication
+- **Local-first Storage** - Messages persist on device (AsyncStorage), works offline
+- **Push Notifications** - Local notifications via expo-notifications
+- **QR Code Sharing** - Share wallet address as QR, scan to add contacts
 - **Message Deletion** - Delete for self or delete for everyone (sender only)
 
 ### 👥 Group Chats
@@ -117,9 +120,13 @@ adb install mukon-debug.apk
   - Keys encrypted with member's wallet-derived encryption key
   - Survive app data deletion / device change
   - Just connect wallet to recover all group access
+- **On-chain Key Distribution** - Admin stores encrypted keys on-chain at invite time
+  - Invitees recover keys from chain even if offline during invite
+  - No dependency on WebSocket for key delivery
+- **Key Rotation on Kick** - New group secret generated and distributed to remaining members
+- **Session Keys (1-click UX)** - Sign once at login, all group operations are automatic
 - **Any Member Can Invite** - Democratic group growth (admin can kick)
 - **Token Gating** - Require SPL token balance to join (configurable)
-- **Group Key Distribution** - Automatic via WebSocket, request if offline
 - **Group Management** - Rename (admin), leave, kick members (admin)
 
 ### 🎨 Profile & Identity
@@ -140,8 +147,8 @@ adb install mukon-debug.apk
 
 ### 🔐 Privacy Features
 
-- **Arcium MPC Integration (v0.7.0)** - Relationship status verified privately via multi-party computation
-  - Status: 3 circuits live on devnet, E2E testing in progress
+- **Arcium MPC Integration (v0.8.0)** - Relationship status verified privately via multi-party computation
+  - Status: 3 circuits live on devnet
   - Circuits: `is_mutual_contact` (30K gates), `count_accepted` (507M ACUs), `add_two_numbers` (473M ACUs)
   - Allows private relationship verification without revealing contact graph
 - **Per-Relationship PDAs** - Each contact pair has its own on-chain account (82 bytes)
@@ -168,6 +175,7 @@ adb install mukon-debug.apk
 - `Group` - Group metadata, members list, token gate, encryption public key
 - `GroupInvite` - Pending group invitations
 - `GroupKeyShare` - Encrypted group key backup per member (for recovery)
+- `SessionToken` - Session key delegation (1-click UX, no repeated wallet popups)
 - `WalletDescriptor` - **LEGACY** — use `close_wallet_descriptor` to reclaim rent
 
 **Instructions:**
@@ -183,30 +191,39 @@ unblock()                   // Blocked → Rejected (allows re-invite)
 close_profile()             // Close profile (devnet only)
 close_wallet_descriptor()   // Close legacy WalletDescriptor + recover rent
 
-// Group Instructions (10)
-create_group()          // Create new group
-update_group()          // Rename group (admin only)
-invite_to_group()       // Invite member (any member can invite)
-accept_group_invite()   // Join group (checks token gate)
-reject_group_invite()   // Decline invitation
-leave_group()           // Leave group
-kick_member()           // Kick member (admin only)
-close_group()           // Delete group (admin only)
-store_group_key()       // Store encrypted key on-chain for recovery
-close_group_key()       // Close key share + recover rent
+// Group Instructions (11)
+create_group()                  // Create new group
+update_group()                  // Rename group (admin only)
+invite_to_group()               // Invite member (any member can invite)
+accept_group_invite()           // Join group (checks token gate)
+reject_group_invite()           // Decline invitation
+leave_group()                   // Leave group
+kick_member()                   // Kick member (admin only) + triggers key rotation
+close_group()                   // Delete group (admin only)
+store_group_key()               // Store encrypted key on-chain for recovery
+store_group_key_for_member()    // Admin stores key for invitee (on-chain distribution)
+close_group_key()               // Close key share + recover rent
+
+// Session Instructions (2)
+create_session()            // Register device keypair for auto-signing
+revoke_session()            // Revoke session key
 ```
 
 ### Layer 2: Off-Chain Backend (Fly.io)
 
 **Backend URL:** https://backend-rough-bird-7310.fly.dev
 
-**Technology:** Node.js + Express + Socket.IO
+**Technology:** Node.js + Express + Socket.IO + Fly.io Postgres
+
+**Role:** Temporary encrypted relay — NOT permanent storage. Messages buffered until client acknowledges, then deleted.
 
 **Features:**
-- Real-time message delivery (WebSocket)
+- Real-time message delivery (WebSocket-first, single machine for session affinity)
 - Wallet signature authentication
-- In-memory storage (messages, read receipts, group avatars)
-- Group key distribution
+- Postgres persistence (messages, read receipts, group avatars, pending key shares)
+- Local-first architecture — clients store messages on device, backend is delivery buffer
+- Group key distribution (WebSocket + on-chain fallback)
+- Key rotation broadcast (`group_key_rotated` event)
 - Message deletion support
 - Read receipt tracking
 
@@ -272,21 +289,26 @@ When you join a group:
 
 2. **Inviting Members:**
    - Admin encrypts `group_secret` with invitee's public encryption key (NaCl box)
-   - Sent via Socket.IO real-time
-   - If invitee offline, they can request key later
+   - **Stored on-chain** via `store_group_key_for_member` (invitee can recover even if offline)
+   - Also sent via Socket.IO for immediate delivery
 
 3. **Accepting Invitation:**
-   - Member receives encrypted group key
-   - Decrypts with their wallet-derived secret key
+   - Member fetches encrypted group key from on-chain GroupKeyShare PDA
+   - Decrypts with admin's encryption pubkey + own secret key (NaCl box.open)
    - Stores locally (AsyncStorage)
-   - **Also stores encrypted copy on-chain** (GroupKeyShare PDA)
+   - **Also stores own encrypted backup on-chain** (GroupKeyShare PDA)
 
-4. **Sending Messages:**
+4. **Key Rotation (on Kick):**
+   - Admin generates new `group_secret`
+   - Distributes to remaining members (on-chain + socket)
+   - Kicked member's old key can't decrypt new messages
+
+5. **Sending Messages:**
    - Encrypt with `group_secret` (NaCl secretbox)
    - Backend broadcasts to group room
    - All members decrypt with same secret
 
-5. **Recovery After Data Loss:**
+6. **Recovery After Data Loss:**
    - Connect wallet → derive encryption keys from signature
    - Fetch GroupKeyShare PDA from on-chain
    - Decrypt group key with wallet-derived secret
@@ -306,7 +328,7 @@ This is **impossible** in WhatsApp/Signal because they don't have blockchain. We
 
 ## Arcium MPC Integration
 
-**Status:** ✅ Live on devnet (v0.7.0) — 3 computation definitions deployed
+**Status:** ✅ Live on devnet (v0.8.0) — 3 computation definitions deployed
 
 Arcium is a Multi-Party Computation (MPC) network on Solana that allows computation on **encrypted data** without revealing the data itself. We use it to verify contact relationships and count contacts privately — no one can see your social graph.
 
@@ -342,12 +364,13 @@ Light Protocol enables compressed accounts on Solana — state stored as hashes 
 - Solana (devnet)
 - Anchor Framework 0.32.1
 - Light Protocol SDK 0.17 with V2 (ZK Compression - production-ready, devnet-disabled)
-- Arcium v0.7.0 (MPC circuits — 3 live on devnet)
+- Arcium v0.8.0 (MPC circuits — 3 live on devnet)
 
 **Backend:**
 - Node.js + Express
-- Socket.IO (WebSocket)
-- Fly.io (deployment)
+- Socket.IO (WebSocket-first transport)
+- Fly.io (deployment + Postgres persistence)
+- PostgreSQL (temporary message buffer, cleaned after delivery)
 
 **Frontend:**
 - React Native + Expo 51
@@ -355,7 +378,9 @@ Light Protocol enables compressed accounts on Solana — state stored as hashes 
 - TweetNaCl (E2E encryption)
 - React Navigation
 - React Native Paper (UI)
-- AsyncStorage (local persistence)
+- AsyncStorage (local-first message storage)
+- expo-notifications (push notifications)
+- expo-camera + react-native-qrcode-svg (QR codes)
 
 **Encryption:**
 - **DMs:** NaCl box (Curve25519-XSalsa20-Poly1305)
@@ -412,27 +437,30 @@ anchor test
 ## Known Limitations (Devnet MVP)
 
 **Current Issues:**
-1. Backend persistence - In-memory storage, resets on deploy (on-chain data persists)
-2. Wallet reconnect - Must reconnect wallet on app restart
-3. Emulator instability - Socket.IO issues on Android emulator (use physical devices)
-4. Domain resolution - Only tested on devnet (needs mainnet .sol domains)
-5. Group key rotation - Only rotates on kick (should rotate periodically)
-6. Light Protocol ZK Compression - Disabled on devnet due to indexer limitations (V2 architecture complete and mainnet-ready)
+1. Domain resolution - Only tested on devnet (needs mainnet .sol domains)
+2. Light Protocol ZK Compression - Disabled on devnet due to indexer limitations (V2 architecture complete and mainnet-ready)
+3. Unread message badges - Need two-device testing
+4. Alert dialogs still white - 87 Alert.alert calls need DarkAlert component
+
+**Fixed (Previously Known):**
+- ~~Backend persistence~~ - Now uses Fly.io Postgres
+- ~~Wallet reconnect~~ - Session persistence with `reauthorize()` fallback
+- ~~Socket instability~~ - WebSocket-first, 1 machine, encryption gate
+- ~~Group key rotation~~ - Rotates on kick, distributes to remaining members
+- ~~Message persistence~~ - Local-first AsyncStorage, backend is temporary buffer
+- ~~Double wallet popups~~ - Session keys eliminate repeated signing
 
 **Security Notes (Pre-Mainnet):**
 - No account versioning - Breaking changes force re-registration
 - No migration path - Need version field + lazy migration
 - No audit - Professional audit required before mainnet
-- Arcium testing - MPC v0.7.0 circuits live on devnet, E2E testing in progress
+- Arcium MPC v0.8.0 circuits live on devnet
 
 **Planned Improvements:**
-- Message persistence (Fly.io Postgres)
-- Wallet persistence (AsyncStorage + auto-reconnect)
-- Push notifications
-- QR code scanner
 - Multi-device support
 - Message search
 - Media messages (images, files)
+- Periodic key rotation (currently only on kick)
 
 ---
 
@@ -442,14 +470,14 @@ anchor test
 
 ```
 mukon-messenger/
-├── programs/mukon-messenger/  # Anchor program (Arcium v0.7.0 + Light Protocol)
+├── programs/mukon-messenger/  # Anchor program (Arcium v0.8.0 + Light Protocol)
 ├── encrypted-ixs/             # Arcium MPC circuit definitions
 ├── app/                       # React Native + Expo 51 client
 │   └── src/
 │       ├── contexts/MessengerContext.tsx  # Core state/socket logic
 │       ├── utils/transactions.ts         # Manual tx builders
 │       └── screens/                      # UI screens
-├── backend/                   # Socket.IO relay (Fly.io)
+├── backend/                   # Socket.IO relay (Fly.io + Postgres)
 ├── build/                     # Compiled Arcium circuits
 └── scripts/                   # Deployment helpers
 ```

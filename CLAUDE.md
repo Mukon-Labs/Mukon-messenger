@@ -133,6 +133,8 @@ adb install -r app-debug.apk
 - ✅ **On-chain key distribution**: `inviteToGroup` and `createGroupWithMembers` now call `store_group_key_for_member` to store encrypted keys on-chain. `acceptGroupInvite` fetches GroupKeyShare PDA from chain.
 - ✅ **Group key rotation**: `kickMember` generates new group secret, distributes to remaining members via on-chain + socket. `group_member_left` auto-rotates if admin.
 - ✅ **Auth fix**: `store_group_key_for_member` now only allows admin (creator) to store keys
+- ✅ **Register + session bundle**: Register and create_session combined into single wallet popup with 0.05 SOL funding
+- ✅ **parseEncryptionPubkey fix**: Proper Borsh layout parsing for UserProfile (was using `data.slice(data.length-32)` which grabbed trailing zeros from fixed-size Anchor buffer)
 - ✅ **Backend**: Added `group_key_rotated` socket event for distributing rotated keys
 - ✅ **Socket stability overhaul**: Fixed constant disconnect/reconnect loop on Android
   - Scaled Fly.io from 2 machines to 1 (eliminates session affinity issues)
@@ -306,7 +308,7 @@ SOLANA PROGRAM (Anchor + Arcium v0.8.0)
   ├── SessionToken (session key delegation for 1-click UX)
   └── WalletDescriptor (LEGACY — close_wallet_descriptor to reclaim rent)
 
-  Instructions (20):
+  Instructions (22):
   ├── register / update_profile / close_profile
   ├── invite / accept / reject / block / unblock
   ├── close_wallet_descriptor (legacy cleanup)
@@ -361,7 +363,7 @@ LAYER 1: ON-CHAIN (Arcium MPC)
 ```
 mukon-messenger/
 ├── programs/mukon-messenger/
-│   ├── src/lib.rs          # Anchor program (Arcium v0.7.0 + Light Protocol)
+│   ├── src/lib.rs          # Anchor program (Arcium v0.8.0 + Light Protocol)
 │   └── Cargo.toml
 ├── encrypted-ixs/           # Arcium MPC circuit definitions
 │   └── src/lib.rs
