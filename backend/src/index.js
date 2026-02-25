@@ -694,6 +694,43 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Group key rotation: admin broadcasts new encrypted keys after kick/leave
+  socket.on('group_key_rotated', async ({ groupId, keyShares }) => {
+    if (!socket.publicKey) {
+      socket.emit('error', { message: 'Not authenticated' });
+      return;
+    }
+
+    console.log(`🔄 Key rotation for group ${groupId.slice(0, 8)}... by ${socket.publicKey.slice(0, 8)}... (${keyShares.length} shares)`);
+
+    // keyShares: Array<{ recipientPubkey, encryptedKey, nonce }>
+    for (const share of keyShares) {
+      // Store for offline members
+      try {
+        await store.savePendingKeyShare(groupId, share.recipientPubkey, {
+          encryptedKey: share.encryptedKey,
+          nonce: share.nonce,
+          senderPubkey: socket.publicKey,
+          storedAt: Date.now()
+        });
+      } catch (err) {
+        console.error('Failed to persist rotated key share:', err);
+      }
+
+      // Deliver immediately if online
+      const recipientSocketId = onlineUsers.get(share.recipientPubkey);
+      if (recipientSocketId) {
+        io.to(recipientSocketId).emit('group_key_shared', {
+          groupId,
+          senderPubkey: socket.publicKey,
+          encryptedKey: share.encryptedKey,
+          nonce: share.nonce,
+          rotated: true,
+        });
+      }
+    }
+  });
+
   // Group avatar handlers (Fix 4)
   socket.on('set_group_avatar', async ({ groupId, avatar }) => {
     if (!socket.publicKey) {

@@ -1,5 +1,40 @@
 # Mukon Messenger - Development Changelog
 
+## Feb 25, 2026 - Session Keys, Key Rotation, On-Chain Key Distribution, Arcium v0.8.0
+
+### Session Keys (1-Click UX)
+- Added `SessionToken` PDA account: `owner`, `session_pubkey`, `created_at`, `expires_at`
+- Seeds: `["session", owner, session_pubkey]`
+- Added `create_session` and `revoke_session` instructions to Solana program
+- Added `resolve_authority()` helper in program — validates session token or direct wallet signer
+- Client generates ed25519 keypair, stores in AsyncStorage, creates session on-chain with ONE wallet popup
+- All subsequent transactions auto-signed via `signAndSendTransaction` helper using session key
+
+### Arcium v0.8.0
+- Bumped arcium-anchor, arcium-client, arcium-macros, arcis from 0.7.0 to 0.8.0
+- Updated both `programs/mukon-messenger/Cargo.toml` and `encrypted-ixs/Cargo.toml`
+
+### On-Chain Key Distribution
+- `inviteToGroup` now calls `store_group_key_for_member` to store encrypted group key on-chain for invitee
+- `createGroupWithMembers` stores keys on-chain for all invited members during group creation
+- `acceptGroupInvite` fetches GroupKeyShare PDA from chain (no longer relies solely on socket)
+- Auth fix: `store_group_key_for_member` now only allows admin (creator) to store keys
+
+### Group Key Rotation
+- `kickMember` generates new group secret, distributes to remaining members via on-chain + socket
+- `group_member_left` handler auto-rotates key if current user is admin
+- Backend: Added `group_key_rotated` socket event for distributing rotated keys to group members
+
+### Files Changed
+- `programs/mukon-messenger/src/lib.rs` — SessionToken, create_session, revoke_session, resolve_authority, auth fix on store_group_key_for_member
+- `programs/mukon-messenger/Cargo.toml` — Arcium v0.8.0
+- `encrypted-ixs/Cargo.toml` — Arcium v0.8.0
+- `app/src/utils/transactions.ts` — Session key helpers, updated discriminators, store_group_key_for_member builder
+- `app/src/contexts/MessengerContext.tsx` — Session key management, on-chain key distribution in invite/create flows, key rotation on kick
+- `backend/src/index.js` — group_key_rotated socket event
+
+---
+
 ## Feb 4, 2026 - Architecture Pivot: Per-Relationship PDAs + Arcium v0.7.0
 
 ### Architecture Pivot: WalletDescriptor → Relationship PDAs

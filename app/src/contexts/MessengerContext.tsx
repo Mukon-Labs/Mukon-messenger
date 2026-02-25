@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey, Keypair, Transaction } from '@solana/web3.js';
 import { io, Socket } from 'socket.io-client';
 import nacl from 'tweetnacl';
 import { Buffer } from 'buffer';
@@ -12,6 +12,7 @@ import {
   getGroupPDA,
   getGroupInvitePDA,
   getGroupKeySharePDA,
+  getSessionTokenPDA,
   createRegisterInstruction,
   createUpdateProfileInstruction,
   createCloseProfileInstruction,
@@ -30,7 +31,10 @@ import {
   createKickMemberInstruction,
   createCloseGroupInstruction,
   createStoreGroupKeyInstruction,
+  createStoreGroupKeyForMemberInstruction,
   createCloseGroupKeyInstruction,
+  createCreateSessionInstruction,
+  createRevokeSessionInstruction,
   // ZK Compression instructions
   createStoreCompressedGroupKeyInstruction,
   createCloseCompressedGroupKeyInstruction,
@@ -48,6 +52,7 @@ import {
   type GroupInvite,
   type GroupKeyShare,
   type TokenGate,
+  type SessionInfo,
 } from '../utils/transactions';
 import { deriveEncryptionKeypair, getChatHash } from '../utils/encryption';
 import type { WalletContextType } from './WalletContext';
@@ -184,6 +189,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   const [readTimestamps, setReadTimestamps] = useState<Map<string, number>>(new Map()); // conversationId/groupId -> latest read timestamp
   const [groupAvatars, setGroupAvatars] = useState<Map<string, string>>(new Map()); // groupId -> emoji (Fix 4)
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
+
+  // Session key state — allows auto-signing without wallet popups
+  const [sessionKeypair, setSessionKeypair] = useState<Keypair | null>(null);
+  const sessionInfoRef = useRef<SessionInfo | null>(null);
 
   // Refs for socket handlers to avoid stale closures (Fix 2b, 2d, Fix 7)
   const encryptionKeysRef = useRef<nacl.BoxKeyPair | null>(null);
@@ -430,6 +439,128 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     }
   }, [wallet?.publicKey, encryptionKeys]);
 
+  // ========== SESSION KEY LIFECYCLE ==========
+  // After encryption is ready, load or create a session key for auto-signing
+  // This eliminates wallet popups for all on-chain operations after initial setup
+  useEffect(() => {
+    if (!wallet?.publicKey || !encryptionReady || !wallet.signTransaction) return;
+    if (sessionKeypair) return; // Already have session key
+
+    const setupSessionKey = async () => {
+      const walletAddress = wallet.publicKey!.toBase58();
+      const storageKey = `@mukon_session_keypair_${walletAddress}`;
+
+      try {
+        // Try to load existing session keypair from AsyncStorage
+        const stored = await AsyncStorage.getItem(storageKey);
+        if (stored) {
+          const { secretKey, validUntil } = JSON.parse(stored);
+          const secretKeyBytes = new Uint8Array(Buffer.from(secretKey, 'base64'));
+          const kp = Keypair.fromSecretKey(secretKeyBytes);
+
+          // Check if session is still valid (with 1 hour buffer)
+          const now = Math.floor(Date.now() / 1000);
+          if (validUntil > now + 3600) {
+            // Verify on-chain session token still exists
+            const sessionTokenPDA = getSessionTokenPDA(kp.publicKey);
+            const accountInfo = await connection.getAccountInfo(sessionTokenPDA);
+
+            if (accountInfo) {
+              console.log('✅ Loaded existing session key from storage');
+              setSessionKeypair(kp);
+              sessionInfoRef.current = {
+                sessionKey: kp.publicKey,
+                walletPubkey: wallet.publicKey!,
+                sessionTokenPDA,
+              };
+              return;
+            } else {
+              console.log('⚠️ Session token not found on-chain, creating new session');
+              await AsyncStorage.removeItem(storageKey);
+            }
+          } else {
+            console.log('⚠️ Session key expired, creating new session');
+            await AsyncStorage.removeItem(storageKey);
+          }
+        }
+
+        // Generate new session keypair
+        const newKeypair = Keypair.generate();
+        const validUntil = Math.floor(Date.now() / 1000) + 7 * 24 * 3600; // 7 days
+
+        // Create session on-chain (ONE wallet popup)
+        console.log('🔑 Creating session key (one-time wallet approval)...');
+        const instruction = createCreateSessionInstruction(
+          wallet.publicKey!,
+          newKeypair.publicKey,
+          validUntil
+        );
+
+        const transaction = await buildTransaction(connection, wallet.publicKey!, [instruction]);
+        const signedTransaction = await wallet.signTransaction!(transaction);
+        const txSignature = await connection.sendTransaction(signedTransaction);
+        await connection.confirmTransaction(txSignature, 'confirmed');
+
+        console.log('✅ Session key created on-chain:', txSignature);
+
+        // Store session keypair in AsyncStorage
+        await AsyncStorage.setItem(storageKey, JSON.stringify({
+          secretKey: Buffer.from(newKeypair.secretKey).toString('base64'),
+          validUntil,
+        }));
+
+        setSessionKeypair(newKeypair);
+        const sessionTokenPDA = getSessionTokenPDA(newKeypair.publicKey);
+        sessionInfoRef.current = {
+          sessionKey: newKeypair.publicKey,
+          walletPubkey: wallet.publicKey!,
+          sessionTokenPDA,
+        };
+
+        console.log('✅ Session key stored and ready — no more wallet popups');
+      } catch (error) {
+        console.error('⚠️ Failed to setup session key, falling back to wallet signing:', error);
+        // Non-fatal — all functions fall back to wallet.signTransaction when session is null
+      }
+    };
+
+    setupSessionKey();
+  }, [wallet?.publicKey, encryptionReady, wallet?.signTransaction, sessionKeypair]);
+
+  // Helper: Sign and send transaction using session key (no wallet popup)
+  // Falls back to wallet.signTransaction if no session key available
+  const signAndSendTransaction = useCallback(async (
+    instructions: any[],
+    opts?: { skipConfirmation?: boolean }
+  ): Promise<string> => {
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
+
+    const session = sessionInfoRef.current;
+    const kp = sessionKeypair;
+
+    if (session && kp) {
+      // Session key path — no wallet popup
+      const payer = kp.publicKey;
+      const transaction = await buildTransaction(connection, payer, instructions);
+      transaction.sign([kp]);
+      const txSignature = await connection.sendRawTransaction(transaction.serialize());
+      if (!opts?.skipConfirmation) {
+        await connection.confirmTransaction(txSignature, 'confirmed');
+      }
+      return txSignature;
+    } else {
+      // Fallback — wallet signs (popup)
+      if (!wallet.signTransaction) throw new Error('Wallet cannot sign');
+      const transaction = await buildTransaction(connection, wallet.publicKey, instructions);
+      const signedTransaction = await wallet.signTransaction(transaction);
+      const txSignature = await connection.sendTransaction(signedTransaction);
+      if (!opts?.skipConfirmation) {
+        await connection.confirmTransaction(txSignature, 'confirmed');
+      }
+      return txSignature;
+    }
+  }, [wallet?.publicKey, wallet?.signTransaction, sessionKeypair, connection]);
+
   // Recover missing group keys from on-chain encrypted backups
   useEffect(() => {
     if (!wallet?.publicKey || !encryptionKeys || groups.length === 0) return;
@@ -644,12 +775,6 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
               saveLocalMessages(wallet.publicKey.toBase58(), message.conversationId, newMessages);
             }
 
-            // Acknowledge delivery so backend can clean up
-            newSocket.emit('messages_delivered', {
-              conversationId: message.conversationId,
-              messageIds: [message.id],
-            });
-
             // Increment unread count if not from current user and not in active conversation (Fix 7)
             const currentActiveConv = activeConversationRef.current;
             const isFromOther = message.sender !== wallet?.publicKey?.toBase58();
@@ -792,12 +917,6 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
               saveLocalGroupMessages(wallet.publicKey.toBase58(), message.groupId, newMessages);
             }
 
-            // Acknowledge delivery so backend can clean up
-            newSocket.emit('group_messages_delivered', {
-              groupId: message.groupId,
-              messageIds: [message.id],
-            });
-
             // Increment unread if not from self and not viewing this group
             const currentActiveGroup = activeGroupRoomRef.current;
             const isFromOther = message.sender !== wallet?.publicKey?.toBase58();
@@ -836,8 +955,91 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       // We'll trigger this in the individual screens that need it
     });
 
-    newSocket.on('group_member_left', ({ groupId, memberPubkey }) => {
+    newSocket.on('group_member_left', async ({ groupId, memberPubkey }) => {
       console.log('👋 Member left group:', groupId, memberPubkey);
+
+      // Auto-rotate group key if we're the admin
+      const currentGroups = groupsRef.current;
+      const group = currentGroups.find(g => Buffer.from(g.groupId).toString('hex') === groupId);
+      if (group && wallet?.publicKey && group.creator.equals(wallet.publicKey)) {
+        console.log('🔄 Auto-rotating group key (admin) after member left...');
+        // Trigger reload first to get updated member list, then rotation happens via kickMember-style logic
+        // For leave events, we schedule rotation after a short delay to let the chain state settle
+        setTimeout(async () => {
+          try {
+            const currentEncKeys = encryptionKeysRef.current;
+            if (!currentEncKeys) return;
+
+            const newGroupSecret = nacl.randomBytes(nacl.secretbox.keyLength);
+            const session = sessionInfoRef.current || undefined;
+            const groupIdBytes = Buffer.from(groupId, 'hex');
+
+            // Update local key
+            setGroupKeys(prev => {
+              const updated = new Map(prev);
+              updated.set(groupId, newGroupSecret);
+              return updated;
+            });
+
+            // Store admin's own backup
+            const adminNonce = nacl.randomBytes(nacl.box.nonceLength);
+            const adminEncKey = nacl.box(newGroupSecret, adminNonce, currentEncKeys.publicKey, currentEncKeys.secretKey);
+            const storeOwnIx = createStoreGroupKeyInstruction(wallet.publicKey!, groupIdBytes, adminEncKey, adminNonce, session);
+            const sessionKp = sessionKeypair;
+            if (session && sessionKp) {
+              const tx = await buildTransaction(connection, sessionKp.publicKey, [storeOwnIx]);
+              tx.sign([sessionKp]);
+              const sig = await connection.sendRawTransaction(tx.serialize());
+              await connection.confirmTransaction(sig, 'confirmed');
+            } else if (wallet.signTransaction) {
+              const tx = await buildTransaction(connection, wallet.publicKey!, [storeOwnIx]);
+              const signed = await wallet.signTransaction(tx);
+              const sig = await connection.sendTransaction(signed);
+              await connection.confirmTransaction(sig, 'confirmed');
+            }
+
+            // Distribute to remaining members via socket
+            const keyShares: Array<{ recipientPubkey: string; encryptedKey: string; nonce: string }> = [];
+            const updatedGroups = groupsRef.current;
+            const updatedGroup = updatedGroups.find(g => Buffer.from(g.groupId).toString('hex') === groupId);
+            if (updatedGroup) {
+              for (const member of updatedGroup.members) {
+                if (member.equals(wallet.publicKey!)) continue;
+                try {
+                  let memberEncPubkey: Uint8Array | undefined = contactsRef.current.find(
+                    c => c.publicKey.equals(member)
+                  )?.encryptionPublicKey;
+                  if (!memberEncPubkey) {
+                    const profilePDA = getUserProfilePDA(member);
+                    const profileAccount = await connection.getAccountInfo(profilePDA);
+                    if (profileAccount) {
+                      memberEncPubkey = new Uint8Array(profileAccount.data.slice(profileAccount.data.length - 32));
+                    }
+                  }
+                  if (memberEncPubkey) {
+                    const mNonce = nacl.randomBytes(nacl.box.nonceLength);
+                    const mEncKey = nacl.box(newGroupSecret, mNonce, memberEncPubkey, currentEncKeys.secretKey);
+                    keyShares.push({
+                      recipientPubkey: member.toBase58(),
+                      encryptedKey: Buffer.from(mEncKey).toString('base64'),
+                      nonce: Buffer.from(mNonce).toString('base64'),
+                    });
+                  }
+                } catch (e) {
+                  console.error(`Failed to encrypt rotated key for ${member.toBase58().slice(0, 8)}:`, e);
+                }
+              }
+            }
+
+            if (keyShares.length > 0) {
+              newSocket.emit('group_key_rotated', { groupId, keyShares });
+              console.log(`🔄 Auto-rotated group key after leave, distributed to ${keyShares.length} members`);
+            }
+          } catch (err) {
+            console.error('⚠️ Auto-rotation after member leave failed:', err);
+          }
+        }, 3000);
+      }
     });
 
     newSocket.on('group_member_kicked', ({ groupId, memberPubkey }) => {
@@ -974,17 +1176,28 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
                   // Create and send transaction
                   const groupIdBytes = Buffer.from(groupId, 'hex');
+                  const session = sessionInfoRef.current || undefined;
                   const storeKeyIx = createStoreGroupKeyInstruction(
                     wallet!.publicKey!,
                     groupIdBytes,
                     encryptedKeyForBackup,
-                    backupNonce
+                    backupNonce,
+                    session
                   );
 
-                  const tx = await buildTransaction(connection, wallet!.publicKey!, [storeKeyIx]);
-                  const signedTx = await wallet!.signTransaction!(tx);
-                  const sig = await connection.sendTransaction(signedTx);
-                  await connection.confirmTransaction(sig, 'confirmed');
+                  // Use session key for auto-signing (no wallet popup)
+                  const sessionKp = sessionKeypair;
+                  if (session && sessionKp) {
+                    const tx = await buildTransaction(connection, sessionKp.publicKey, [storeKeyIx]);
+                    tx.sign([sessionKp]);
+                    const sig = await connection.sendRawTransaction(tx.serialize());
+                    await connection.confirmTransaction(sig, 'confirmed');
+                  } else {
+                    const tx = await buildTransaction(connection, wallet!.publicKey!, [storeKeyIx]);
+                    const signedTx = await wallet!.signTransaction!(tx);
+                    const sig = await connection.sendTransaction(signedTx);
+                    await connection.confirmTransaction(sig, 'confirmed');
+                  }
 
                   await AsyncStorage.setItem(backupKey, 'true');
                   console.log('✅ Group key backed up on-chain successfully');
@@ -1152,21 +1365,20 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
   // Other functions (updateProfile, invite, etc.)
   const updateProfile = async (displayName: string, avatarType?: 'Emoji' | 'Nft', avatarData?: string) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
+      const session = sessionInfoRef.current || undefined;
       const instruction = createUpdateProfileInstruction(
         wallet.publicKey,
         displayName,
         avatarType || null,
         avatarData || null,
-        encryptionKeys ? Array.from(encryptionKeys.publicKey) : null
+        encryptionKeys ? Array.from(encryptionKeys.publicKey) : null,
+        session
       );
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const txSignature = await signAndSendTransaction([instruction]);
 
       // Reload profile to reflect changes
       await loadProfile();
@@ -1180,15 +1392,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const closeProfile = async () => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
-      const instruction = createCloseProfileInstruction(wallet.publicKey);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const session = sessionInfoRef.current || undefined;
+      const instruction = createCloseProfileInstruction(wallet.publicKey, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       // Clear local state
       setProfile(null);
@@ -1207,17 +1417,15 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const invite = async (inviteePubkey: PublicKey) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
+      const session = sessionInfoRef.current || undefined;
       // Calculate chat hash for the conversation PDA
       const chatHash = getChatHash(wallet.publicKey, inviteePubkey);
-      const instruction = createInviteInstruction(wallet.publicKey, inviteePubkey, chatHash);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const instruction = createInviteInstruction(wallet.publicKey, inviteePubkey, chatHash, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       await loadContacts();
 
@@ -1247,15 +1455,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const acceptInvitation = async (inviterPubkey: PublicKey) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
-      const instruction = createAcceptInvitationInstruction(wallet.publicKey, inviterPubkey);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const session = sessionInfoRef.current || undefined;
+      const instruction = createAcceptInvitationInstruction(wallet.publicKey, inviterPubkey, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       await loadContacts();
 
@@ -1286,15 +1492,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const rejectInvitation = async (inviterPubkey: PublicKey) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
-      const instruction = createRejectInvitationInstruction(wallet.publicKey, inviterPubkey);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const session = sessionInfoRef.current || undefined;
+      const instruction = createRejectInvitationInstruction(wallet.publicKey, inviterPubkey, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       // Notify the other user that invitation was rejected
       if (socket) {
@@ -1319,15 +1523,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const blockContact = async (contactPubkey: PublicKey) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
-      const instruction = createBlockInstruction(wallet.publicKey, contactPubkey);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const session = sessionInfoRef.current || undefined;
+      const instruction = createBlockInstruction(wallet.publicKey, contactPubkey, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       await loadContacts();
       return txSignature;
@@ -1340,15 +1542,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const unblockContact = async (contactPubkey: PublicKey) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
-      const instruction = createUnblockInstruction(wallet.publicKey, contactPubkey);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const session = sessionInfoRef.current || undefined;
+      const instruction = createUnblockInstruction(wallet.publicKey, contactPubkey, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       await loadContacts();
       return txSignature;
@@ -1361,15 +1561,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const closeRelationship = async (contactPubkey: PublicKey) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
-      const instruction = createCloseRelationshipInstruction(wallet.publicKey, contactPubkey);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const session = sessionInfoRef.current || undefined;
+      const instruction = createCloseRelationshipInstruction(wallet.publicKey, contactPubkey, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       await loadContacts();
       console.log('✅ Relationship closed:', contactPubkey.toBase58().slice(0, 8));
@@ -1569,7 +1767,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       }
 
       const signatureB58 = bs58.encode(encryptionSig);
-      const url = `${BACKEND_URL}/messages/${conversationId}?sender=${walletAddress}&signature=${encodeURIComponent(signatureB58)}&acknowledge=true`;
+      const url = `${BACKEND_URL}/messages/${conversationId}?sender=${walletAddress}&signature=${encodeURIComponent(signatureB58)}`;
       const response = await fetch(url);
 
       if (!response.ok) {
@@ -1587,16 +1785,38 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         });
       }
 
-      // Step 3: Merge local + backend, deduplicate by message ID
+      // Step 3: Merge local + backend, deduplicate (ID + encrypted+nonce+sender)
       setMessages((prev) => {
         const updated = new Map(prev);
         const currentMessages = updated.get(conversationId) || [];
 
-        // Build a set of existing message IDs for deduplication
-        const existingIds = new Set(currentMessages.map((m: any) => m.id));
+        // Multi-field dedup: matches by ID or by encrypted content (handles temp-ID vs real-ID)
+        const isDuplicate = (existing: any[], msg: any) =>
+          existing.some((m: any) =>
+            m.id === msg.id ||
+            (m.encrypted && msg.encrypted &&
+             m.encrypted === msg.encrypted &&
+             m.nonce === msg.nonce &&
+             m.sender === msg.sender)
+          );
 
-        // Add backend messages that aren't already local
-        const newFromBackend = data.messages.filter((m: any) => !existingIds.has(m.id));
+        // Filter out backend messages already in local cache, and replace temp messages with real ones
+        const newFromBackend: any[] = [];
+        for (const backendMsg of data.messages) {
+          const tempMatch = currentMessages.findIndex((m: any) =>
+            m.id !== backendMsg.id &&
+            m.encrypted && backendMsg.encrypted &&
+            m.encrypted === backendMsg.encrypted &&
+            m.nonce === backendMsg.nonce &&
+            m.sender === backendMsg.sender
+          );
+          if (tempMatch >= 0) {
+            // Replace temp message with real backend message (preserves real ID)
+            currentMessages[tempMatch] = { ...backendMsg, status: currentMessages[tempMatch].status };
+          } else if (!isDuplicate(currentMessages, backendMsg)) {
+            newFromBackend.push(backendMsg);
+          }
+        }
 
         // Apply read status based on persisted timestamps
         const applyReadStatus = (msg: any) => {
@@ -1919,11 +2139,12 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   // ========== GROUP METHODS ==========
 
   const createGroup = async (name: string, tokenGate?: TokenGate) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
     if (!encryptionKeys) throw new Error('Encryption keys not available');
 
     setLoading(true);
     try {
+      const session = sessionInfoRef.current || undefined;
       // Generate random group ID
       const groupId = nacl.randomBytes(32);
 
@@ -1943,13 +2164,11 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         groupId,
         name,
         encryptionKeys.publicKey, // For key distribution
-        tokenGate || null
+        tokenGate || null,
+        session
       );
 
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const txSignature = await signAndSendTransaction([instruction]);
 
       await loadGroups();
 
@@ -1968,11 +2187,12 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     invitees: PublicKey[],
     tokenGate?: TokenGate
   ) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
     if (!encryptionKeys) throw new Error('Encryption keys not available');
 
     setLoading(true);
     try {
+      const session = sessionInfoRef.current || undefined;
       // Generate random group ID
       const groupId = nacl.randomBytes(32);
 
@@ -2002,7 +2222,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         invitees.map(invitee =>
           USE_ZK_COMPRESSION
             ? createInviteToGroupCompressedInstruction(wallet.publicKey, groupId, invitee)
-            : Promise.resolve(createInviteToGroupInstruction(wallet.publicKey, groupId, invitee))
+            : Promise.resolve(createInviteToGroupInstruction(wallet.publicKey, groupId, invitee, session))
         )
       );
 
@@ -2019,7 +2239,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
             wallet.publicKey,
             groupId,
             adminEncryptedKey,
-            adminNonce
+            adminNonce,
+            session
           );
 
       const instructions = [
@@ -2028,17 +2249,15 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           groupId,
           name,
           encryptionKeys.publicKey,
-          tokenGate || null
+          tokenGate || null,
+          session
         ),
         ...inviteInstructions,
         storeKeyInstruction
       ];
 
       // Single transaction with all instructions
-      const transaction = await buildTransaction(connection, wallet.publicKey, instructions);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const txSignature = await signAndSendTransaction(instructions);
 
       await loadGroups();
 
@@ -2100,14 +2319,21 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
               console.log(`🔑 Shared group key with ${inviteePubkey.toBase58().slice(0, 8)}...`);
 
-              // Also store invitee's encrypted key share on-chain for recovery
+              // Store invitee's encrypted key share on-chain for recovery
               try {
-                // Note: We need to use invitee as payer for their GroupKeyShare account
-                // For now, we'll skip on-chain storage for invitees - they'll store their own key when they accept
-                // This is a limitation of not having the invitee's signature here
-                // TODO: Store invitee keys on-chain when they accept the invite
+                const storeForMemberIx = createStoreGroupKeyForMemberInstruction(
+                  wallet.publicKey!,
+                  groupId,
+                  inviteePubkey,
+                  encryptedKey,
+                  nonce,
+                  session
+                );
+                await signAndSendTransaction([storeForMemberIx]);
+                console.log(`💾 Stored on-chain key share for ${inviteePubkey.toBase58().slice(0, 8)}...`);
               } catch (err) {
                 console.error(`Failed to store invitee group key on-chain:`, err);
+                // Non-fatal — invitee still has key via Socket.IO
               }
             } else {
               console.warn(`⚠️ Could not find encryption pubkey for ${inviteePubkey.toBase58().slice(0, 8)}...`);
@@ -2128,21 +2354,20 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const updateGroup = async (groupId: Uint8Array, name?: string, tokenGate?: TokenGate) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
+      const session = sessionInfoRef.current || undefined;
       const instruction = createUpdateGroupInstruction(
         wallet.publicKey,
         groupId,
         name || null,
-        tokenGate || null
+        tokenGate || null,
+        session
       );
 
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const txSignature = await signAndSendTransaction([instruction]);
 
       await loadGroups();
       return txSignature;
@@ -2155,18 +2380,16 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const inviteToGroup = async (groupId: Uint8Array, inviteePubkey: PublicKey) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
     if (!encryptionKeys) throw new Error('Encryption keys not available');
 
     setLoading(true);
     try {
+      const session = sessionInfoRef.current || undefined;
       // ALWAYS use regular PDA version (not compressed)
       // Compressed operations fail on devnet with unknown account errors
-      const instruction = createInviteToGroupInstruction(wallet.publicKey, groupId, inviteePubkey);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const instruction = createInviteToGroupInstruction(wallet.publicKey, groupId, inviteePubkey, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       // Share group key with invitee via Socket.IO (Fix 2d: use ref to avoid stale closure)
       const groupIdHex = Buffer.from(groupId).toString('hex');
@@ -2185,8 +2408,6 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           const profileAccount = await connection.getAccountInfo(profilePDA);
 
           if (profileAccount) {
-            // UserProfile layout: discriminator(8) + owner(32) + name(4+len) + avatar_type(1) + avatar_data(4+len) + encryption_pubkey(32)
-            // We need the last 32 bytes
             const data = profileAccount.data;
             inviteeEncryptionPubkey = new Uint8Array(data.slice(data.length - 32));
           }
@@ -2210,6 +2431,23 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           });
 
           console.log('🔑 Shared group key with invitee via Socket.IO');
+
+          // Store invitee's encrypted key share on-chain for offline recovery
+          try {
+            const storeForMemberIx = createStoreGroupKeyForMemberInstruction(
+              wallet.publicKey,
+              groupId,
+              inviteePubkey,
+              encryptedKey,
+              nonce,
+              session
+            );
+            await signAndSendTransaction([storeForMemberIx]);
+            console.log(`💾 Stored on-chain key share for ${inviteePubkey.toBase58().slice(0, 8)}...`);
+          } catch (err) {
+            console.error(`Failed to store on-chain key for invitee:`, err);
+            // Non-fatal — invitee still has key via Socket.IO
+          }
         } else {
           console.warn(`⚠️ Could not find encryption pubkey for ${inviteePubkey.toBase58().slice(0, 8)}...`);
         }
@@ -2225,39 +2463,69 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const acceptGroupInvite = async (groupId: Uint8Array, userTokenAccount?: PublicKey) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
-      // ALWAYS use regular PDA version (not compressed)
-      // Compressed MUTATION operations fail on devnet indexer
-      // The compressed accept_group_invite_compressed uses LightAccount::new_mut()
-      // which nullifies old account and creates new one - indexer can't track this
+      const session = sessionInfoRef.current || undefined;
       const instruction = createAcceptGroupInviteInstruction(
         wallet.publicKey,
         groupId,
-        userTokenAccount || null
+        userTokenAccount || null,
+        session
       );
 
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const txSignature = await signAndSendTransaction([instruction]);
 
       await loadGroups();
       await loadGroupInvites();
 
+      const groupIdHex = Buffer.from(groupId).toString('hex');
+
+      // Try to fetch group key from on-chain (stored by inviter via store_group_key_for_member)
+      if (encryptionKeys && !groupKeys.has(groupIdHex)) {
+        try {
+          const groupKeySharePDA = getGroupKeySharePDA(groupId, wallet.publicKey);
+          const accountInfo = await connection.getAccountInfo(groupKeySharePDA);
+
+          if (accountInfo) {
+            const keyShare = deserializeGroupKeyShare(accountInfo.data);
+
+            // Find the inviter's encryption pubkey to decrypt
+            // The key was encrypted with our pubkey by the inviter
+            const decryptedKey = nacl.box.open(
+              keyShare.encryptedKey,
+              keyShare.nonce,
+              encryptionKeys.publicKey,
+              encryptionKeys.secretKey
+            );
+
+            if (decryptedKey) {
+              setGroupKeys(prev => {
+                const updated = new Map(prev);
+                updated.set(groupIdHex, decryptedKey);
+                return updated;
+              });
+              console.log('✅ Fetched group key from on-chain backup');
+            }
+          }
+        } catch (err) {
+          console.error('Failed to fetch on-chain group key:', err);
+        }
+      }
+
       // Notify group via socket
       if (socket) {
-        const groupIdHex = Buffer.from(groupId).toString('hex');
         socket.emit('join_group', {
           groupId: groupIdHex,
           memberPubkey: wallet.publicKey.toBase58(),
         });
 
-        // Request group key from backend (in case we were offline when invited)
-        socket.emit('request_group_key', { groupId: groupIdHex });
-        console.log('🔑 Requested group key from backend');
+        // Fallback: request group key from backend (in case on-chain fetch failed)
+        if (!groupKeys.has(groupIdHex)) {
+          socket.emit('request_group_key', { groupId: groupIdHex });
+          console.log('🔑 Requested group key from backend (fallback)');
+        }
       }
 
       return txSignature;
@@ -2270,20 +2538,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const rejectGroupInvite = async (groupId: Uint8Array) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
-      // ALWAYS use regular PDA version (not compressed)
-      // Compressed MUTATION operations fail on devnet indexer
-      // The compressed reject_group_invite_compressed uses LightAccount::new_mut()
-      // which nullifies old account and creates new one - indexer can't track this
-      const instruction = createRejectGroupInviteInstruction(wallet.publicKey, groupId);
-
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const session = sessionInfoRef.current || undefined;
+      const instruction = createRejectGroupInviteInstruction(wallet.publicKey, groupId, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       await loadGroupInvites();
       return txSignature;
@@ -2296,12 +2557,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const leaveGroup = async (groupId: Uint8Array) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
+      const session = sessionInfoRef.current || undefined;
       // Build instructions: leave group + close key share (to recover rent)
-      const instructions = [createLeaveGroupInstruction(wallet.publicKey, groupId)];
+      const instructions = [createLeaveGroupInstruction(wallet.publicKey, groupId, session)];
 
       // Use compressed for CLOSE operation (works on devnet)
       // close_compressed_group_key uses LightAccount::new_close() - nullifies account only
@@ -2330,13 +2592,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           console.warn('No stored key data for compressed close, skipping key closure');
         }
       } else {
-        instructions.push(createCloseGroupKeyInstruction(wallet.publicKey, groupId));
+        instructions.push(createCloseGroupKeyInstruction(wallet.publicKey, groupId, session));
       }
 
-      const transaction = await buildTransaction(connection, wallet.publicKey, instructions);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const txSignature = await signAndSendTransaction(instructions);
 
       // Remove group key from local storage
       const groupIdHex = Buffer.from(groupId).toString('hex');
@@ -2365,29 +2624,132 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const kickMember = async (groupId: Uint8Array, memberPubkey: PublicKey) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
+    if (!encryptionKeys) throw new Error('Encryption keys not available');
 
     setLoading(true);
     try {
-      const instruction = createKickMemberInstruction(wallet.publicKey, groupId, memberPubkey);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const session = sessionInfoRef.current || undefined;
+      const instruction = createKickMemberInstruction(wallet.publicKey, groupId, memberPubkey, session);
+      const txSignature = await signAndSendTransaction([instruction]);
+
+      const groupIdHex = Buffer.from(groupId).toString('hex');
 
       // Notify group via socket
       if (socket) {
-        const groupIdHex = Buffer.from(groupId).toString('hex');
         socket.emit('kick_member', {
           groupId: groupIdHex,
           memberPubkey: memberPubkey.toBase58(),
         });
       }
 
-      // TODO: For production, implement key rotation here
-      // Generate new group key and share with remaining members
+      // KEY ROTATION: Generate new group key and distribute to remaining members
+      // This ensures kicked member can't decrypt future messages
+      try {
+        const newGroupSecret = nacl.randomBytes(nacl.secretbox.keyLength);
 
-      await loadGroups();
+        // Update local key
+        setGroupKeys(prev => {
+          const updated = new Map(prev);
+          updated.set(groupIdHex, newGroupSecret);
+          return updated;
+        });
+
+        // Store admin's own encrypted backup of new key on-chain
+        const adminNonce = nacl.randomBytes(nacl.box.nonceLength);
+        const adminEncryptedKey = nacl.box(
+          newGroupSecret,
+          adminNonce,
+          encryptionKeys.publicKey,
+          encryptionKeys.secretKey
+        );
+        const storeOwnKeyIx = createStoreGroupKeyInstruction(
+          wallet.publicKey,
+          groupId,
+          adminEncryptedKey,
+          adminNonce,
+          session
+        );
+        await signAndSendTransaction([storeOwnKeyIx]);
+
+        // Reload groups to get updated member list (without kicked member)
+        await loadGroups();
+        const updatedGroup = groupsRef.current.find(
+          g => Buffer.from(g.groupId).toString('hex') === groupIdHex
+        );
+
+        if (updatedGroup) {
+          // Prepare key shares for all remaining members
+          const keyShares: Array<{ recipientPubkey: string; encryptedKey: string; nonce: string }> = [];
+
+          for (const member of updatedGroup.members) {
+            // Skip self (already stored above) and the kicked member
+            if (member.equals(wallet.publicKey) || member.equals(memberPubkey)) continue;
+
+            try {
+              // Fetch member's encryption pubkey
+              let memberEncPubkey: Uint8Array | undefined = contactsRef.current.find(
+                c => c.publicKey.equals(member)
+              )?.encryptionPublicKey;
+
+              if (!memberEncPubkey) {
+                const profilePDA = getUserProfilePDA(member);
+                const profileAccount = await connection.getAccountInfo(profilePDA);
+                if (profileAccount) {
+                  const data = profileAccount.data;
+                  memberEncPubkey = new Uint8Array(data.slice(data.length - 32));
+                }
+              }
+
+              if (memberEncPubkey) {
+                const memberNonce = nacl.randomBytes(nacl.box.nonceLength);
+                const memberEncryptedKey = nacl.box(
+                  newGroupSecret,
+                  memberNonce,
+                  memberEncPubkey,
+                  encryptionKeys.secretKey
+                );
+
+                // Store on-chain for offline recovery
+                try {
+                  const storeForMemberIx = createStoreGroupKeyForMemberInstruction(
+                    wallet.publicKey,
+                    groupId,
+                    member,
+                    memberEncryptedKey,
+                    memberNonce,
+                    session
+                  );
+                  await signAndSendTransaction([storeForMemberIx]);
+                } catch (storeErr) {
+                  console.error(`Failed to store rotated key on-chain for ${member.toBase58().slice(0, 8)}:`, storeErr);
+                }
+
+                keyShares.push({
+                  recipientPubkey: member.toBase58(),
+                  encryptedKey: Buffer.from(memberEncryptedKey).toString('base64'),
+                  nonce: Buffer.from(memberNonce).toString('base64'),
+                });
+              }
+            } catch (memberErr) {
+              console.error(`Failed to encrypt rotated key for ${member.toBase58().slice(0, 8)}:`, memberErr);
+            }
+          }
+
+          // Broadcast rotated keys via socket for immediate delivery
+          if (socket && keyShares.length > 0) {
+            socket.emit('group_key_rotated', {
+              groupId: groupIdHex,
+              keyShares,
+            });
+            console.log(`🔄 Rotated group key and distributed to ${keyShares.length} members`);
+          }
+        }
+      } catch (rotationError) {
+        console.error('⚠️ Key rotation failed after kick:', rotationError);
+        // Non-fatal — kick succeeded, but key wasn't rotated
+      }
+
       return txSignature;
     } catch (error) {
       console.error('Failed to kick member:', error);
@@ -2398,15 +2760,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const closeGroup = async (groupId: Uint8Array) => {
-    if (!wallet?.publicKey || !wallet.signTransaction) throw new Error('Wallet not connected');
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
 
     setLoading(true);
     try {
-      const instruction = createCloseGroupInstruction(wallet.publicKey, groupId);
-      const transaction = await buildTransaction(connection, wallet.publicKey, [instruction]);
-      const signedTransaction = await wallet.signTransaction(transaction);
-      const txSignature = await connection.sendTransaction(signedTransaction);
-      await connection.confirmTransaction(txSignature, 'confirmed');
+      const session = sessionInfoRef.current || undefined;
+      const instruction = createCloseGroupInstruction(wallet.publicKey, groupId, session);
+      const txSignature = await signAndSendTransaction([instruction]);
 
       // Remove group key from local storage
       const groupIdHex = Buffer.from(groupId).toString('hex');
@@ -2682,7 +3042,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       }
 
       const signatureB58 = bs58.encode(encryptionSig);
-      const url = `${BACKEND_URL}/group-messages/${groupId}?sender=${walletAddress}&signature=${encodeURIComponent(signatureB58)}&acknowledge=true`;
+      const url = `${BACKEND_URL}/group-messages/${groupId}?sender=${walletAddress}&signature=${encodeURIComponent(signatureB58)}`;
       const response = await fetch(url);
 
       if (!response.ok) {
@@ -2700,16 +3060,38 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         });
       }
 
-      // Step 3: Merge local + backend, deduplicate by message ID
+      // Step 3: Merge local + backend, deduplicate (ID + encrypted+nonce+sender)
       setGroupMessages(prev => {
         const updated = new Map(prev);
         const currentMessages = updated.get(groupId) || [];
 
-        // Build a set of existing message IDs for deduplication
-        const existingIds = new Set(currentMessages.map((m: any) => m.id));
+        // Multi-field dedup: matches by ID or by encrypted content (handles temp-ID vs real-ID)
+        const isDuplicate = (existing: any[], msg: any) =>
+          existing.some((m: any) =>
+            m.id === msg.id ||
+            (m.encrypted && msg.encrypted &&
+             m.encrypted === msg.encrypted &&
+             m.nonce === msg.nonce &&
+             m.sender === msg.sender)
+          );
 
-        // Add backend messages that aren't already local
-        const newFromBackend = data.messages.filter((m: any) => !existingIds.has(m.id));
+        // Filter out backend messages already in local cache, and replace temp messages with real ones
+        const newFromBackend: any[] = [];
+        for (const backendMsg of data.messages) {
+          const tempMatch = currentMessages.findIndex((m: any) =>
+            m.id !== backendMsg.id &&
+            m.encrypted && backendMsg.encrypted &&
+            m.encrypted === backendMsg.encrypted &&
+            m.nonce === backendMsg.nonce &&
+            m.sender === backendMsg.sender
+          );
+          if (tempMatch >= 0) {
+            // Replace temp message with real backend message (preserves real ID)
+            currentMessages[tempMatch] = { ...backendMsg, status: currentMessages[tempMatch].status };
+          } else if (!isDuplicate(currentMessages, backendMsg)) {
+            newFromBackend.push(backendMsg);
+          }
+        }
 
         // Apply read status based on persisted timestamps
         const applyReadStatus = (msg: any) => {

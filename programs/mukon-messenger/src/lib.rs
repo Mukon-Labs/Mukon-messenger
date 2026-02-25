@@ -63,6 +63,10 @@ pub enum ErrorCode {
     AbortedComputation,
     #[msg("Cluster not set")]
     ClusterNotSet,
+    #[msg("Invalid session")]
+    InvalidSession,
+    #[msg("Session expired")]
+    SessionExpired,
 }
 
 // Deterministic hash function for chat PDAs
@@ -101,6 +105,19 @@ fn canonical_order(a: Pubkey, b: Pubkey) -> (Pubkey, Pubkey) {
     if a < b { (a, b) } else { (b, a) }
 }
 
+/// Resolve the actual wallet authority from either a direct signer or a session token.
+/// If session_token is provided, validates the session key matches the payer and is not expired,
+/// then returns the wallet authority. Otherwise returns the payer key directly.
+fn resolve_authority(payer: &Pubkey, session_token: Option<&SessionToken>) -> Result<Pubkey> {
+    if let Some(session) = session_token {
+        require!(session.session_key == *payer, ErrorCode::InvalidSession);
+        require!(Clock::get()?.unix_timestamp <= session.valid_until, ErrorCode::SessionExpired);
+        Ok(session.authority)
+    } else {
+        Ok(*payer)
+    }
+}
+
 #[arcium_program]
 pub mod mukon_messenger {
     use super::*;
@@ -122,6 +139,27 @@ pub mod mukon_messenger {
         Ok(())
     }
 
+    /// Create a session token that allows a device keypair to sign on behalf of the wallet.
+    /// The wallet signs once; all subsequent on-chain actions use the session key (zero popups).
+    pub fn create_session(ctx: Context<CreateSession>, valid_until: i64) -> Result<()> {
+        let session = &mut ctx.accounts.session_token;
+        session.authority = ctx.accounts.authority.key();
+        session.session_key = ctx.accounts.session_key.key();
+        session.valid_until = valid_until;
+
+        msg!("Session created: authority={:?}, session_key={:?}, valid_until={}",
+             session.authority, session.session_key, valid_until);
+
+        Ok(())
+    }
+
+    /// Revoke a session token. Only the original wallet authority can revoke.
+    pub fn revoke_session(ctx: Context<RevokeSession>) -> Result<()> {
+        msg!("Session revoked: authority={:?}, session_key={:?}",
+             ctx.accounts.session_token.authority, ctx.accounts.session_token.session_key);
+        Ok(())
+    }
+
     pub fn update_profile(
         ctx: Context<UpdateProfile>,
         display_name: Option<String>,
@@ -129,7 +167,17 @@ pub mod mukon_messenger {
         avatar_data: Option<String>,
         encryption_public_key: Option<[u8; 32]>
     ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+
+        // Verify the passed authority account matches the resolved authority
+        require!(ctx.accounts.authority.key() == authority, ErrorCode::Unauthorized);
         let user_profile = &mut ctx.accounts.user_profile;
+
+        // Verify the resolved authority owns this profile
+        require!(user_profile.owner == authority, ErrorCode::Unauthorized);
 
         if let Some(name) = display_name {
             require!(name.len() <= 32, ErrorCode::DisplayNameTooLong);
@@ -148,7 +196,7 @@ pub mod mukon_messenger {
             user_profile.encryption_public_key = key;
         }
 
-        msg!("Profile updated: {:?}", ctx.accounts.payer.key());
+        msg!("Profile updated: {:?}", authority);
 
         Ok(())
     }
@@ -156,11 +204,16 @@ pub mod mukon_messenger {
     /// Close profile account and return rent (useful for testing/redeployment)
     /// WARNING: This is a destructive operation - use with caution!
     pub fn close_profile(ctx: Context<CloseProfile>) -> Result<()> {
-        // Verify UserProfile PDA
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+
+        // Verify UserProfile PDA using resolved authority
         let (expected_profile_pda, _) = Pubkey::find_program_address(
             &[
                 b"user_profile",
-                ctx.accounts.payer.key().as_ref(),
+                authority.as_ref(),
                 USER_PROFILE_VERSION.as_ref(),
             ],
             ctx.program_id,
@@ -172,13 +225,13 @@ pub mod mukon_messenger {
             ErrorCode::InvalidHash
         );
 
-        // Close UserProfile
+        // Close UserProfile — return lamports to the payer (session key or wallet)
         let profile_lamports = ctx.accounts.user_profile.lamports();
         **ctx.accounts.user_profile.lamports.borrow_mut() = 0;
         **ctx.accounts.payer.lamports.borrow_mut() += profile_lamports;
         ctx.accounts.user_profile.try_borrow_mut_data()?.fill(0);
 
-        msg!("Profile closed: {:?}", ctx.accounts.payer.key());
+        msg!("Profile closed: {:?}", authority);
         Ok(())
     }
 
@@ -209,11 +262,14 @@ pub mod mukon_messenger {
     }
 
     pub fn invite(ctx: Context<Invite>, _hash: [u8; 32]) -> Result<()> {
-        let inviter = &ctx.accounts.payer;
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let invitee = &ctx.accounts.invitee;
         let relationship = &mut ctx.accounts.relationship;
 
-        let hash = get_chat_hash(inviter.key(), invitee.key());
+        let hash = get_chat_hash(authority, invitee.key());
         require!(hash == _hash, ErrorCode::InvalidHash);
 
         // Validate canonical ordering
@@ -221,8 +277,8 @@ pub mod mukon_messenger {
         let user_b = ctx.accounts.user_b.key();
         require!(user_a < user_b, ErrorCode::InvalidHash);
 
-        // Validate that user_a and user_b match payer and invitee
-        let (expected_a, expected_b) = canonical_order(inviter.key(), invitee.key());
+        // Validate that user_a and user_b match authority and invitee
+        let (expected_a, expected_b) = canonical_order(authority, invitee.key());
         require!(user_a == expected_a && user_b == expected_b, ErrorCode::InvalidHash);
 
         // If PDA already exists (re-invite), only allow from Rejected or Empty state
@@ -238,7 +294,7 @@ pub mod mukon_messenger {
         relationship.created_at = Clock::get()?.unix_timestamp;
 
         // Set status based on canonical ordering
-        if inviter.key() == user_a {
+        if authority == user_a {
             relationship.status_a = STATUS_INVITED;
             relationship.status_b = STATUS_REQUESTED;
         } else {
@@ -247,24 +303,27 @@ pub mod mukon_messenger {
         }
 
         let conversation = &mut ctx.accounts.conversation;
-        conversation.participants = [inviter.key(), invitee.key()];
+        conversation.participants = [authority, invitee.key()];
         conversation.created_at = Clock::get()?.unix_timestamp;
 
         msg!("Invite: sender={:?}, target={:?}, chat={:?}",
-             inviter.key(), invitee.key(), hash);
+             authority, invitee.key(), hash);
 
         Ok(())
     }
 
     pub fn accept(ctx: Context<Accept>) -> Result<()> {
-        let me = &ctx.accounts.payer;
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let peer = &ctx.accounts.peer;
         let relationship = &mut ctx.accounts.relationship;
 
-        let (user_a, _) = canonical_order(me.key(), peer.key());
+        let (user_a, _) = canonical_order(authority, peer.key());
 
         // Verify caller has Requested status and peer has Invited status
-        if me.key() == user_a {
+        if authority == user_a {
             require!(relationship.status_a == STATUS_REQUESTED, ErrorCode::NotRequested);
             require!(relationship.status_b == STATUS_INVITED, ErrorCode::NotInvited);
         } else {
@@ -276,20 +335,23 @@ pub mod mukon_messenger {
         relationship.status_b = STATUS_ACCEPTED;
 
         msg!("Accept: accepter={:?}, inviter={:?}, chat={:?}",
-             me.key(), peer.key(), get_chat_hash(me.key(), peer.key()));
+             authority, peer.key(), get_chat_hash(authority, peer.key()));
 
         Ok(())
     }
 
     pub fn reject(ctx: Context<Reject>) -> Result<()> {
-        let me = &ctx.accounts.payer;
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let peer = &ctx.accounts.peer;
         let relationship = &mut ctx.accounts.relationship;
 
-        let (user_a, _) = canonical_order(me.key(), peer.key());
+        let (user_a, _) = canonical_order(authority, peer.key());
 
         // Allow rejecting any non-blocked relationship
-        let my_status = if me.key() == user_a { relationship.status_a } else { relationship.status_b };
+        let my_status = if authority == user_a { relationship.status_a } else { relationship.status_b };
         require!(
             my_status == STATUS_REQUESTED || my_status == STATUS_INVITED || my_status == STATUS_ACCEPTED || my_status == STATUS_REJECTED,
             ErrorCode::NotRequested
@@ -299,32 +361,38 @@ pub mod mukon_messenger {
         relationship.status_b = STATUS_REJECTED;
 
         msg!("Reject: rejecter={:?}, peer={:?}",
-             me.key(), peer.key());
+             authority, peer.key());
 
         Ok(())
     }
 
     pub fn block(ctx: Context<Block>) -> Result<()> {
-        let me = &ctx.accounts.payer;
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let peer = &ctx.accounts.peer;
         let relationship = &mut ctx.accounts.relationship;
 
         // Relationship must exist (any non-empty status)
-        let (user_a, _) = canonical_order(me.key(), peer.key());
-        let my_status = if me.key() == user_a { relationship.status_a } else { relationship.status_b };
+        let (user_a, _) = canonical_order(authority, peer.key());
+        let my_status = if authority == user_a { relationship.status_a } else { relationship.status_b };
         require!(my_status != STATUS_EMPTY, ErrorCode::NotInvited);
 
         relationship.status_a = STATUS_BLOCKED;
         relationship.status_b = STATUS_BLOCKED;
 
         msg!("Block: blocker={:?}, blocked={:?}",
-             me.key(), peer.key());
+             authority, peer.key());
 
         Ok(())
     }
 
     pub fn unblock(ctx: Context<Unblock>) -> Result<()> {
-        let me = &ctx.accounts.payer;
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let peer = &ctx.accounts.peer;
         let relationship = &mut ctx.accounts.relationship;
 
@@ -339,13 +407,19 @@ pub mod mukon_messenger {
         relationship.status_b = STATUS_REJECTED;
 
         msg!("Unblock: unblocker={:?}, unblocked={:?}",
-             me.key(), peer.key());
+             authority, peer.key());
 
         Ok(())
     }
 
     /// Close a Relationship PDA and return rent (either party can close)
     pub fn close_relationship(ctx: Context<CloseRelationship>) -> Result<()> {
+        // Session support — resolve_authority validates if session token is used
+        let _authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+
         let relationship_lamports = ctx.accounts.relationship.to_account_info().lamports();
         **ctx.accounts.relationship.to_account_info().lamports.borrow_mut() = 0;
         **ctx.accounts.payer.lamports.borrow_mut() += relationship_lamports;
@@ -365,19 +439,23 @@ pub mod mukon_messenger {
         encryption_pubkey: [u8; 32],
         token_gate: Option<TokenGate>
     ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         require!(name.len() <= 64, ErrorCode::GroupNameTooLong);
 
         let group = &mut ctx.accounts.group;
         group.group_id = group_id;
-        group.creator = ctx.accounts.payer.key();
+        group.creator = authority;
         group.name = name.clone();
         group.created_at = Clock::get()?.unix_timestamp;
-        group.members = vec![ctx.accounts.payer.key()];
+        group.members = vec![authority];
         group.encryption_pubkey = encryption_pubkey;
         group.token_gate = token_gate;
 
         msg!("Group created: id={:?}, name={}, creator={:?}",
-             group_id, name, ctx.accounts.payer.key());
+             group_id, name, authority);
 
         Ok(())
     }
@@ -387,13 +465,14 @@ pub mod mukon_messenger {
         name: Option<String>,
         token_gate: Option<TokenGate>
     ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let group = &mut ctx.accounts.group;
 
         // Only creator can update group
-        require!(
-            group.creator == ctx.accounts.payer.key(),
-            ErrorCode::NotGroupAdmin
-        );
+        require!(group.creator == authority, ErrorCode::NotGroupAdmin);
 
         if let Some(new_name) = name {
             require!(new_name.len() <= 64, ErrorCode::GroupNameTooLong);
@@ -410,13 +489,14 @@ pub mod mukon_messenger {
     }
 
     pub fn invite_to_group(ctx: Context<InviteToGroup>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let group = &ctx.accounts.group;
 
         // Any member can invite (creator can kick bad actors)
-        require!(
-            group.members.contains(&ctx.accounts.payer.key()),
-            ErrorCode::NotGroupMember
-        );
+        require!(group.members.contains(&authority), ErrorCode::NotGroupMember);
 
         // Check if group is full
         require!(group.members.len() < 30, ErrorCode::GroupFull);
@@ -430,7 +510,7 @@ pub mod mukon_messenger {
         // Create or update invite
         let invite = &mut ctx.accounts.group_invite;
         invite.group_id = group.group_id;
-        invite.inviter = ctx.accounts.payer.key();
+        invite.inviter = authority;
         invite.invitee = ctx.accounts.invitee.key();
         invite.status = GroupInviteStatus::Pending;
         invite.created_at = Clock::get()?.unix_timestamp;
@@ -442,6 +522,14 @@ pub mod mukon_messenger {
     }
 
     pub fn accept_group_invite(ctx: Context<AcceptGroupInvite>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+
+        // Verify the passed authority account matches the resolved authority
+        require!(ctx.accounts.authority.key() == authority, ErrorCode::Unauthorized);
+
         let group = &mut ctx.accounts.group;
         let invite = &mut ctx.accounts.group_invite;
 
@@ -451,20 +539,17 @@ pub mod mukon_messenger {
             ErrorCode::NotInvited
         );
 
-        // Verify invitee is the signer
-        require!(
-            invite.invitee == ctx.accounts.payer.key(),
-            ErrorCode::NotInvited
-        );
+        // Verify invitee is the resolved authority
+        require!(invite.invitee == authority, ErrorCode::NotInvited);
 
         // Check token gate if exists
         if let Some(gate) = &group.token_gate {
             let token_account = ctx.accounts.user_token_account.as_ref()
                 .ok_or(ErrorCode::TokenAccountRequired)?;
 
-            // SECURITY FIX: Verify token account ownership
+            // SECURITY FIX: Verify token account ownership against resolved authority
             require!(
-                token_account.owner == ctx.accounts.payer.key(),
+                token_account.owner == authority,
                 ErrorCode::InvalidTokenAccount
             );
 
@@ -476,18 +561,26 @@ pub mod mukon_messenger {
         require!(group.members.len() < 30, ErrorCode::GroupFull);
 
         // Add to group
-        group.members.push(ctx.accounts.payer.key());
+        group.members.push(authority);
 
         // Update invite status
         invite.status = GroupInviteStatus::Accepted;
 
         msg!("Group invite accepted: group={:?}, member={:?}",
-             group.group_id, ctx.accounts.payer.key());
+             group.group_id, authority);
 
         Ok(())
     }
 
     pub fn reject_group_invite(ctx: Context<RejectGroupInvite>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+
+        // Verify the passed authority account matches the resolved authority
+        require!(ctx.accounts.authority.key() == authority, ErrorCode::Unauthorized);
+
         let invite = &mut ctx.accounts.group_invite;
 
         // Verify invite status
@@ -496,53 +589,49 @@ pub mod mukon_messenger {
             ErrorCode::NotInvited
         );
 
-        // Verify invitee is the signer
-        require!(
-            invite.invitee == ctx.accounts.payer.key(),
-            ErrorCode::NotInvited
-        );
+        // Verify invitee is the resolved authority
+        require!(invite.invitee == authority, ErrorCode::NotInvited);
 
         // Update invite status
         invite.status = GroupInviteStatus::Rejected;
 
         msg!("Group invite rejected: group={:?}, invitee={:?}",
-             invite.group_id, ctx.accounts.payer.key());
+             invite.group_id, authority);
 
         Ok(())
     }
 
     pub fn leave_group(ctx: Context<LeaveGroup>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let group = &mut ctx.accounts.group;
 
         // Cannot leave if you're the creator
-        require!(
-            group.creator != ctx.accounts.payer.key(),
-            ErrorCode::CannotRemoveCreator
-        );
+        require!(group.creator != authority, ErrorCode::CannotRemoveCreator);
 
         // Verify member is in group
-        require!(
-            group.members.contains(&ctx.accounts.payer.key()),
-            ErrorCode::NotGroupMember
-        );
+        require!(group.members.contains(&authority), ErrorCode::NotGroupMember);
 
         // Remove from members
-        group.members.retain(|m| m != &ctx.accounts.payer.key());
+        group.members.retain(|m| m != &authority);
 
         msg!("Left group: group={:?}, member={:?}",
-             group.group_id, ctx.accounts.payer.key());
+             group.group_id, authority);
 
         Ok(())
     }
 
     pub fn kick_member(ctx: Context<KickMember>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let group = &mut ctx.accounts.group;
 
         // Only creator can kick (admin-only for MVP)
-        require!(
-            group.creator == ctx.accounts.payer.key(),
-            ErrorCode::NotGroupAdmin
-        );
+        require!(group.creator == authority, ErrorCode::NotGroupAdmin);
 
         // Cannot kick the creator
         require!(
@@ -566,15 +655,16 @@ pub mod mukon_messenger {
     }
 
     pub fn close_group(ctx: Context<CloseGroup>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let group = &ctx.accounts.group;
 
         // Only creator can delete
-        require!(
-            group.creator == ctx.accounts.payer.key(),
-            ErrorCode::NotGroupAdmin
-        );
+        require!(group.creator == authority, ErrorCode::NotGroupAdmin);
 
-        // Transfer lamports back to creator
+        // Transfer lamports back to payer (session key or wallet)
         let group_lamports = ctx.accounts.group.to_account_info().lamports();
         **ctx.accounts.group.to_account_info().lamports.borrow_mut() = 0;
         **ctx.accounts.payer.lamports.borrow_mut() += group_lamports;
@@ -590,46 +680,59 @@ pub mod mukon_messenger {
         encrypted_key: Vec<u8>,
         nonce: [u8; 24],
     ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+
+        // Verify the passed authority account matches the resolved authority
+        require!(ctx.accounts.authority.key() == authority, ErrorCode::Unauthorized);
+
         let key_share = &mut ctx.accounts.group_key_share;
         let group = &ctx.accounts.group;
 
-        // Verify payer is a member of the group
-        require!(
-            group.members.contains(&ctx.accounts.payer.key()),
-            ErrorCode::NotGroupMember
-        );
+        // Verify resolved authority is a member of the group
+        require!(group.members.contains(&authority), ErrorCode::NotGroupMember);
 
         // Store the encrypted key share
         key_share.group_id = group.group_id;
-        key_share.member = ctx.accounts.payer.key();
+        key_share.member = authority;
         key_share.encrypted_key = encrypted_key;
         key_share.nonce = nonce;
 
-        msg!("Group key stored for member: {:?}", ctx.accounts.payer.key());
+        msg!("Group key stored for member: {:?}", authority);
 
         Ok(())
     }
 
     pub fn close_group_key(ctx: Context<CloseGroupKey>) -> Result<()> {
-        // Verify the key share belongs to the payer
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+
+        // Verify the passed authority account matches the resolved authority
+        require!(ctx.accounts.authority.key() == authority, ErrorCode::Unauthorized);
+
+        // Verify the key share belongs to the resolved authority
         require!(
-            ctx.accounts.group_key_share.member == ctx.accounts.payer.key(),
+            ctx.accounts.group_key_share.member == authority,
             ErrorCode::Unauthorized
         );
 
-        // Transfer lamports back to member
+        // Transfer lamports back to payer (session key or wallet)
         let key_share_lamports = ctx.accounts.group_key_share.to_account_info().lamports();
         **ctx.accounts.group_key_share.to_account_info().lamports.borrow_mut() = 0;
         **ctx.accounts.payer.lamports.borrow_mut() += key_share_lamports;
 
-        msg!("Group key share closed for member: {:?}", ctx.accounts.payer.key());
+        msg!("Group key share closed for member: {:?}", authority);
 
         Ok(())
     }
 
     /// Store a group key on behalf of another member
-    /// This allows the inviter/creator to store keys for invitees
-    /// eliminating Socket.IO dependency for key distribution
+    /// Only the group creator (admin) can store keys for other members.
+    /// This eliminates Socket.IO dependency for key distribution.
     pub fn store_group_key_for_member(
         ctx: Context<StoreGroupKeyForMember>,
         group_id: [u8; 32],
@@ -637,20 +740,18 @@ pub mod mukon_messenger {
         encrypted_key: Vec<u8>,
         nonce: [u8; 24],
     ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
         let key_share = &mut ctx.accounts.group_key_share;
         let group = &ctx.accounts.group;
 
-        // Verify payer is a member of the group (to authorize storing for others)
-        require!(
-            group.members.contains(&ctx.accounts.payer.key()),
-            ErrorCode::NotGroupMember
-        );
+        // SECURITY: Only the group creator can store keys for other members
+        require!(group.creator == authority, ErrorCode::NotGroupAdmin);
 
-        // Verify target member is in the group (or has been invited)
-        require!(
-            group.members.contains(&member),
-            ErrorCode::NotGroupMember
-        );
+        // Verify target member is in the group
+        require!(group.members.contains(&member), ErrorCode::NotGroupMember);
 
         // Store the encrypted key share for the member
         key_share.group_id = group_id;
@@ -658,7 +759,7 @@ pub mod mukon_messenger {
         key_share.encrypted_key = encrypted_key;
         key_share.nonce = nonce;
 
-        msg!("Group key stored for member: {:?} by: {:?}", member, ctx.accounts.payer.key());
+        msg!("Group key stored for member: {:?} by admin: {:?}", member, authority);
 
         Ok(())
     }
@@ -1181,6 +1282,7 @@ const GROUP_VERSION: [u8; 1] = [1];
 const GROUP_INVITE_VERSION: [u8; 1] = [1];
 const GROUP_KEY_SHARE_VERSION: [u8; 1] = [1];
 const RELATIONSHIP_VERSION: [u8; 1] = [1];
+const SESSION_TOKEN_VERSION: [u8; 1] = [1];
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
 pub enum PeerState {
@@ -1277,6 +1379,16 @@ pub struct Relationship {
 }
 // Space: 8 + 32 + 32 + 1 + 1 + 8 = 82 bytes
 
+/// Session token: allows a device keypair to sign on behalf of a wallet.
+/// Seeds: ["session", session_key]
+#[account]
+pub struct SessionToken {
+    pub authority: Pubkey,     // the wallet that authorized this session
+    pub session_key: Pubkey,   // the local device keypair
+    pub valid_until: i64,      // expiration timestamp
+}
+// Space: 8 + 32 + 32 + 8 = 80 bytes
+
 // ========== COMPRESSED ACCOUNT STRUCTURES (Light Protocol ZK Compression) ==========
 
 /// Compressed version of GroupKeyShare for ZK compression
@@ -1343,19 +1455,56 @@ pub struct Register<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Create a session token allowing a device keypair to sign on behalf of the wallet.
+/// The wallet (authority) signs this transaction once. All future txs use session_key.
+#[derive(Accounts)]
+pub struct CreateSession<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = 80,  // 8 disc + 32 authority + 32 session_key + 8 valid_until
+        seeds = [b"session", session_key.key().as_ref(), SESSION_TOKEN_VERSION.as_ref()],
+        bump
+    )]
+    pub session_token: Account<'info, SessionToken>,
+    #[account(mut)]
+    pub authority: Signer<'info>,  // The wallet — signs once
+    /// CHECK: The device keypair public key (does not need to sign this tx)
+    pub session_key: AccountInfo<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+/// Revoke a session token. Only the original wallet authority can revoke.
+#[derive(Accounts)]
+pub struct RevokeSession<'info> {
+    #[account(
+        mut,
+        close = authority,
+        seeds = [b"session", session_token.session_key.as_ref(), SESSION_TOKEN_VERSION.as_ref()],
+        bump,
+        has_one = authority
+    )]
+    pub session_token: Account<'info, SessionToken>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
 #[derive(Accounts)]
 pub struct UpdateProfile<'info> {
     #[account(
         mut,
-        seeds = [b"user_profile", payer.key().as_ref(), USER_PROFILE_VERSION.as_ref()],
+        seeds = [b"user_profile", authority.key().as_ref(), USER_PROFILE_VERSION.as_ref()],
         bump,
         realloc = 8 + 32 + (4 + 32) + 1 + (4 + 128) + 32,
         realloc::payer = payer,
         realloc::zero = true
     )]
     pub user_profile: Account<'info, UserProfile>,
+    /// CHECK: The wallet pubkey used for PDA derivation. When using sessions, this differs from payer.
+    pub authority: AccountInfo<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1366,6 +1515,7 @@ pub struct CloseProfile<'info> {
     pub user_profile: UncheckedAccount<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1386,9 +1536,9 @@ pub struct Invite<'info> {
     pub payer: Signer<'info>,
     /// CHECK: invitee is a public key
     pub invitee: AccountInfo<'info>,
-    /// CHECK: must be min(payer, invitee) — validated in instruction
+    /// CHECK: must be min(authority, invitee) — validated in instruction
     pub user_a: AccountInfo<'info>,
-    /// CHECK: must be max(payer, invitee) — validated in instruction
+    /// CHECK: must be max(authority, invitee) — validated in instruction
     pub user_b: AccountInfo<'info>,
     #[account(
         init_if_needed,
@@ -1406,6 +1556,7 @@ pub struct Invite<'info> {
         bump
     )]
     pub conversation: Account<'info, Conversation>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1415,9 +1566,9 @@ pub struct Accept<'info> {
     pub payer: Signer<'info>,
     /// CHECK: peer is a public key
     pub peer: AccountInfo<'info>,
-    /// CHECK: must be min(payer, peer) — validated in instruction
+    /// CHECK: must be min(authority, peer) — validated in instruction
     pub user_a: AccountInfo<'info>,
-    /// CHECK: must be max(payer, peer) — validated in instruction
+    /// CHECK: must be max(authority, peer) — validated in instruction
     pub user_b: AccountInfo<'info>,
     #[account(
         mut,
@@ -1425,6 +1576,7 @@ pub struct Accept<'info> {
         bump
     )]
     pub relationship: Account<'info, Relationship>,
+    pub session_token: Option<Account<'info, SessionToken>>,
 }
 
 #[derive(Accounts)]
@@ -1433,9 +1585,9 @@ pub struct Reject<'info> {
     pub payer: Signer<'info>,
     /// CHECK: peer is a public key
     pub peer: AccountInfo<'info>,
-    /// CHECK: must be min(payer, peer) — validated in instruction
+    /// CHECK: must be min(authority, peer)
     pub user_a: AccountInfo<'info>,
-    /// CHECK: must be max(payer, peer) — validated in instruction
+    /// CHECK: must be max(authority, peer)
     pub user_b: AccountInfo<'info>,
     #[account(
         mut,
@@ -1443,6 +1595,7 @@ pub struct Reject<'info> {
         bump
     )]
     pub relationship: Account<'info, Relationship>,
+    pub session_token: Option<Account<'info, SessionToken>>,
 }
 
 #[derive(Accounts)]
@@ -1451,9 +1604,9 @@ pub struct Block<'info> {
     pub payer: Signer<'info>,
     /// CHECK: peer is a public key
     pub peer: AccountInfo<'info>,
-    /// CHECK: must be min(payer, peer) — validated in instruction
+    /// CHECK: must be min(authority, peer)
     pub user_a: AccountInfo<'info>,
-    /// CHECK: must be max(payer, peer) — validated in instruction
+    /// CHECK: must be max(authority, peer)
     pub user_b: AccountInfo<'info>,
     #[account(
         mut,
@@ -1461,6 +1614,7 @@ pub struct Block<'info> {
         bump
     )]
     pub relationship: Account<'info, Relationship>,
+    pub session_token: Option<Account<'info, SessionToken>>,
 }
 
 #[derive(Accounts)]
@@ -1469,9 +1623,9 @@ pub struct Unblock<'info> {
     pub payer: Signer<'info>,
     /// CHECK: peer is a public key
     pub peer: AccountInfo<'info>,
-    /// CHECK: must be min(payer, peer) — validated in instruction
+    /// CHECK: must be min(authority, peer)
     pub user_a: AccountInfo<'info>,
-    /// CHECK: must be max(payer, peer) — validated in instruction
+    /// CHECK: must be max(authority, peer)
     pub user_b: AccountInfo<'info>,
     #[account(
         mut,
@@ -1479,6 +1633,7 @@ pub struct Unblock<'info> {
         bump
     )]
     pub relationship: Account<'info, Relationship>,
+    pub session_token: Option<Account<'info, SessionToken>>,
 }
 
 #[derive(Accounts)]
@@ -1487,9 +1642,9 @@ pub struct CloseRelationship<'info> {
     pub payer: Signer<'info>,
     /// CHECK: the other party in the relationship
     pub peer: AccountInfo<'info>,
-    /// CHECK: must be min(payer, peer)
+    /// CHECK: must be min(authority, peer)
     pub user_a: AccountInfo<'info>,
-    /// CHECK: must be max(payer, peer)
+    /// CHECK: must be max(authority, peer)
     pub user_b: AccountInfo<'info>,
     #[account(
         mut,
@@ -1497,6 +1652,7 @@ pub struct CloseRelationship<'info> {
         bump
     )]
     pub relationship: Account<'info, Relationship>,
+    pub session_token: Option<Account<'info, SessionToken>>,
 }
 
 // ========== GROUP CONTEXT STRUCTURES ==========
@@ -1514,6 +1670,7 @@ pub struct CreateGroup<'info> {
     pub group: Account<'info, Group>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1527,6 +1684,7 @@ pub struct UpdateGroup<'info> {
     pub group: Account<'info, Group>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1550,6 +1708,7 @@ pub struct InviteToGroup<'info> {
     pub invitee: AccountInfo<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1566,13 +1725,16 @@ pub struct AcceptGroupInvite<'info> {
     pub group: Account<'info, Group>,
     #[account(
         mut,
-        seeds = [b"group_invite", group.group_id.as_ref(), payer.key().as_ref(), GROUP_INVITE_VERSION.as_ref()],
+        seeds = [b"group_invite", group.group_id.as_ref(), authority.key().as_ref(), GROUP_INVITE_VERSION.as_ref()],
         bump
     )]
     pub group_invite: Account<'info, GroupInvite>,
     pub user_token_account: Option<Account<'info, TokenAccount>>,
+    /// CHECK: The wallet pubkey. When using sessions, differs from payer. Used for PDA derivation.
+    pub authority: AccountInfo<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
     pub token_program: Option<Program<'info, Token>>,
 }
@@ -1581,12 +1743,15 @@ pub struct AcceptGroupInvite<'info> {
 pub struct RejectGroupInvite<'info> {
     #[account(
         mut,
-        seeds = [b"group_invite", group_invite.group_id.as_ref(), payer.key().as_ref(), GROUP_INVITE_VERSION.as_ref()],
+        seeds = [b"group_invite", group_invite.group_id.as_ref(), authority.key().as_ref(), GROUP_INVITE_VERSION.as_ref()],
         bump
     )]
     pub group_invite: Account<'info, GroupInvite>,
+    /// CHECK: The wallet pubkey. When using sessions, differs from payer. Used for PDA derivation.
+    pub authority: AccountInfo<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
 }
 
 #[derive(Accounts)]
@@ -1602,6 +1767,7 @@ pub struct LeaveGroup<'info> {
     pub group: Account<'info, Group>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1620,6 +1786,7 @@ pub struct KickMember<'info> {
     pub member: AccountInfo<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1634,6 +1801,7 @@ pub struct CloseGroup<'info> {
     pub group: Account<'info, Group>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
 }
 
 #[derive(Accounts)]
@@ -1643,7 +1811,7 @@ pub struct StoreGroupKey<'info> {
         init_if_needed,
         payer = payer,
         space = 8 + 32 + 32 + (4 + 48) + 24,  // disc + group_id + member + Vec(encrypted_key) + nonce
-        seeds = [b"group_key", group_id.as_ref(), payer.key().as_ref(), GROUP_KEY_SHARE_VERSION.as_ref()],
+        seeds = [b"group_key", group_id.as_ref(), authority.key().as_ref(), GROUP_KEY_SHARE_VERSION.as_ref()],
         bump
     )]
     pub group_key_share: Account<'info, GroupKeyShare>,
@@ -1652,8 +1820,11 @@ pub struct StoreGroupKey<'info> {
         bump
     )]
     pub group: Account<'info, Group>,
+    /// CHECK: The wallet pubkey. When using sessions, differs from payer. Used for PDA derivation.
+    pub authority: AccountInfo<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1662,16 +1833,19 @@ pub struct CloseGroupKey<'info> {
     #[account(
         mut,
         close = payer,
-        seeds = [b"group_key", group_key_share.group_id.as_ref(), payer.key().as_ref(), GROUP_KEY_SHARE_VERSION.as_ref()],
+        seeds = [b"group_key", group_key_share.group_id.as_ref(), authority.key().as_ref(), GROUP_KEY_SHARE_VERSION.as_ref()],
         bump
     )]
     pub group_key_share: Account<'info, GroupKeyShare>,
+    /// CHECK: The wallet pubkey. When using sessions, differs from payer. Used for PDA derivation.
+    pub authority: AccountInfo<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
 }
 
 /// Context for storing a group key on behalf of another member
-/// Allows inviter/creator to store keys for invitees
+/// Only admin (creator) can store keys for other members
 #[derive(Accounts)]
 #[instruction(group_id: [u8; 32], member: Pubkey, encrypted_key: Vec<u8>, nonce: [u8; 24])]
 pub struct StoreGroupKeyForMember<'info> {
@@ -1690,6 +1864,7 @@ pub struct StoreGroupKeyForMember<'info> {
     pub group: Account<'info, Group>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
     pub system_program: Program<'info, System>,
 }
 

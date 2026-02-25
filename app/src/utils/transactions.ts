@@ -23,6 +23,8 @@ const PROGRAM_ID = new PublicKey('54QTyrURUpcwjxbQyeC75xS8vg73pFNnuqhiFtNgGcqy')
 // Instruction discriminators from IDL
 // NOTE: Group discriminators need to be computed after program deployment
 // Use: anchor idl parse -f programs/mukon-messenger/target/idl/mukon_messenger.json
+// NOTE: create_session, revoke_session, and store_group_key_for_member discriminators
+// are PLACEHOLDERS. Run `node scripts/update-discriminators.js` after program rebuild.
 const DISCRIMINATORS = {
   accept: Buffer.from([0x41, 0x96, 0x46, 0xd8, 0x85, 0x06, 0x6b, 0x04]), // 419646d885066b04
   accept_group_invite: Buffer.from([0xbe, 0x30, 0x7f, 0x36, 0x49, 0x93, 0xe3, 0xfd]), // be307f364993e3fd
@@ -38,6 +40,7 @@ const DISCRIMINATORS = {
   count_accepted_callback: Buffer.from([0x2c, 0x63, 0x42, 0x0d, 0x15, 0x07, 0x1c, 0xaa]), // 2c63420d15071caa
   count_accepted_contacts: Buffer.from([0xd3, 0x76, 0x6e, 0xfb, 0xe2, 0x3a, 0x3c, 0x4d]), // d3766efbe23a3c4d
   create_group: Buffer.from([0x4f, 0x3c, 0x9e, 0x86, 0x3d, 0xc7, 0x38, 0xf8]), // 4f3c9e863dc738f8
+  create_session: Buffer.from([0xf2, 0xc1, 0x8f, 0xb3, 0x96, 0x19, 0x7a, 0xe3]), // f2c18fb396197ae3
   init_add_two_numbers_comp_def: Buffer.from([0x43, 0xee, 0x95, 0x82, 0xa3, 0xa4, 0x21, 0xf1]), // 43ee9582a3a421f1
   init_count_accepted_comp_def: Buffer.from([0x11, 0xee, 0xc7, 0x80, 0x8e, 0x16, 0x75, 0x5e]), // 11eec7808e16755e
   init_is_mutual_contact_comp_def: Buffer.from([0x0b, 0x2e, 0xb2, 0xaa, 0xc0, 0x96, 0x1b, 0xd0]), // 0b2eb2aac0961bd0
@@ -51,8 +54,10 @@ const DISCRIMINATORS = {
   reject: Buffer.from([0x87, 0x07, 0x3f, 0x55, 0x83, 0x72, 0x6f, 0xe0]), // 87073f5583726fe0
   reject_group_invite: Buffer.from([0xa2, 0xe1, 0x8b, 0x8e, 0x35, 0xb6, 0xd9, 0xe7]), // a2e18b8e35b6d9e7
   reject_group_invite_compressed: Buffer.from([0x61, 0x09, 0x98, 0x1d, 0xfc, 0x5a, 0x0d, 0x9c]), // 6109981dfc5a0d9c
+  revoke_session: Buffer.from([0x56, 0x5c, 0xc6, 0x78, 0x90, 0x02, 0x07, 0xc2]), // 565cc678900207c2
   store_compressed_group_key: Buffer.from([0xaa, 0x74, 0x0b, 0x51, 0xbb, 0x27, 0x2e, 0x2f]), // aa740b51bb272e2f
   store_group_key: Buffer.from([0x25, 0x39, 0x5b, 0x44, 0x63, 0x70, 0xce, 0x9b]), // 25395b446370ce9b
+  store_group_key_for_member: Buffer.from([0x18, 0x8c, 0xa4, 0xea, 0xaf, 0xb5, 0xb2, 0xae]), // 188ca4eaafb5b2ae
   unblock: Buffer.from([0xc2, 0x31, 0xad, 0x2b, 0xf6, 0xa4, 0x0e, 0x0b]), // c231ad2bf6a40e0b
   update_group: Buffer.from([0x09, 0xf2, 0x01, 0x6e, 0x5b, 0x16, 0xac, 0x61]), // 09f2016e5b16ac61
   update_profile: Buffer.from([0x62, 0x43, 0x63, 0xce, 0x56, 0x73, 0xaf, 0x01]), // 624363ce5673af01
@@ -107,6 +112,24 @@ export function getGroupKeySharePDA(groupId: Uint8Array, member: PublicKey): Pub
   return pda;
 }
 
+export function getSessionTokenPDA(sessionKey: PublicKey): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('session'), sessionKey.toBuffer(), Buffer.from([1])],
+    PROGRAM_ID
+  );
+  return pda;
+}
+
+/**
+ * Session token info passed to instruction builders.
+ * When present, the session key signs instead of the wallet.
+ */
+export interface SessionInfo {
+  sessionKey: PublicKey;      // The device keypair (signer)
+  walletPubkey: PublicKey;    // The original wallet authority
+  sessionTokenPDA: PublicKey; // The SessionToken PDA
+}
+
 /**
  * Canonical ordering helper for Relationship PDAs
  * Returns [min(a,b), max(a,b)]
@@ -131,6 +154,64 @@ function serializeString(str: string): Buffer {
   length.writeUInt32LE(encoded.length, 0);
   return Buffer.concat([length, encoded]);
 }
+
+// ========== SESSION KEY INSTRUCTIONS ==========
+
+/**
+ * Build create_session instruction.
+ * The wallet (authority) signs once to authorize a device keypair.
+ */
+export function createCreateSessionInstruction(
+  authority: PublicKey,
+  sessionKey: PublicKey,
+  validUntil: number
+): TransactionInstruction {
+  const sessionTokenPDA = getSessionTokenPDA(sessionKey);
+
+  // Serialize: discriminator + valid_until (i64 LE)
+  const validUntilBuf = Buffer.alloc(8);
+  validUntilBuf.writeBigInt64LE(BigInt(validUntil), 0);
+
+  const data = Buffer.concat([
+    DISCRIMINATORS.create_session,
+    validUntilBuf,
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: sessionTokenPDA, isSigner: false, isWritable: true },
+      { pubkey: authority, isSigner: true, isWritable: true },
+      { pubkey: sessionKey, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+/**
+ * Build revoke_session instruction.
+ * Only the original wallet authority can revoke.
+ */
+export function createRevokeSessionInstruction(
+  authority: PublicKey,
+  sessionKey: PublicKey
+): TransactionInstruction {
+  const sessionTokenPDA = getSessionTokenPDA(sessionKey);
+
+  const data = DISCRIMINATORS.revoke_session;
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: sessionTokenPDA, isSigner: false, isWritable: true },
+      { pubkey: authority, isSigner: true, isWritable: true },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+// ========== PROFILE INSTRUCTIONS ==========
 
 /**
  * Build register instruction
@@ -164,20 +245,22 @@ export function createRegisterInstruction(
 
 /**
  * Build close_profile instruction
- * WARNING: This closes the account and returns rent - destructive operation!
- * Useful for testing/redeployment during development.
  */
 export function createCloseProfileInstruction(
-  payer: PublicKey
+  payer: PublicKey,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const userProfile = getUserProfilePDA(payer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const userProfile = getUserProfilePDA(authority);
 
   const data = DISCRIMINATORS.close_profile;
 
   return new TransactionInstruction({
     keys: [
       { pubkey: userProfile, isSigner: false, isWritable: true },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
@@ -191,13 +274,15 @@ export function createCloseProfileInstruction(
 export function createInviteInstruction(
   payer: PublicKey,
   invitee: PublicKey,
-  chatHash: Uint8Array
+  chatHash: Uint8Array,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const [userA, userB] = canonicalOrder(payer, invitee);
-  const relationship = getRelationshipPDA(payer, invitee);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const [userA, userB] = canonicalOrder(authority, invitee);
+  const relationship = getRelationshipPDA(authority, invitee);
   const conversation = getConversationPDA(chatHash);
 
-  // Serialize instruction data: discriminator + hash (32 bytes, no length prefix for fixed array)
   const data = Buffer.concat([
     DISCRIMINATORS.invite,
     Buffer.from(chatHash),
@@ -205,12 +290,13 @@ export function createInviteInstruction(
 
   return new TransactionInstruction({
     keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
       { pubkey: invitee, isSigner: false, isWritable: false },
       { pubkey: userA, isSigner: false, isWritable: false },
       { pubkey: userB, isSigner: false, isWritable: false },
       { pubkey: relationship, isSigner: false, isWritable: true },
       { pubkey: conversation, isSigner: false, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
@@ -223,20 +309,24 @@ export function createInviteInstruction(
  */
 export function createAcceptInstruction(
   payer: PublicKey,
-  peer: PublicKey
+  peer: PublicKey,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const [userA, userB] = canonicalOrder(payer, peer);
-  const relationship = getRelationshipPDA(payer, peer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const [userA, userB] = canonicalOrder(authority, peer);
+  const relationship = getRelationshipPDA(authority, peer);
 
   const data = DISCRIMINATORS.accept;
 
   return new TransactionInstruction({
     keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
       { pubkey: peer, isSigner: false, isWritable: false },
       { pubkey: userA, isSigner: false, isWritable: false },
       { pubkey: userB, isSigner: false, isWritable: false },
       { pubkey: relationship, isSigner: false, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
     data,
@@ -248,20 +338,24 @@ export function createAcceptInstruction(
  */
 export function createRejectInstruction(
   payer: PublicKey,
-  peer: PublicKey
+  peer: PublicKey,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const [userA, userB] = canonicalOrder(payer, peer);
-  const relationship = getRelationshipPDA(payer, peer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const [userA, userB] = canonicalOrder(authority, peer);
+  const relationship = getRelationshipPDA(authority, peer);
 
   const data = DISCRIMINATORS.reject;
 
   return new TransactionInstruction({
     keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
       { pubkey: peer, isSigner: false, isWritable: false },
       { pubkey: userA, isSigner: false, isWritable: false },
       { pubkey: userB, isSigner: false, isWritable: false },
       { pubkey: relationship, isSigner: false, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
     data,
@@ -277,20 +371,24 @@ export const createRejectInvitationInstruction = createRejectInstruction;
  */
 export function createBlockInstruction(
   payer: PublicKey,
-  peer: PublicKey
+  peer: PublicKey,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const [userA, userB] = canonicalOrder(payer, peer);
-  const relationship = getRelationshipPDA(payer, peer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const [userA, userB] = canonicalOrder(authority, peer);
+  const relationship = getRelationshipPDA(authority, peer);
 
   const data = DISCRIMINATORS.block;
 
   return new TransactionInstruction({
     keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
       { pubkey: peer, isSigner: false, isWritable: false },
       { pubkey: userA, isSigner: false, isWritable: false },
       { pubkey: userB, isSigner: false, isWritable: false },
       { pubkey: relationship, isSigner: false, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
     data,
@@ -302,20 +400,24 @@ export function createBlockInstruction(
  */
 export function createUnblockInstruction(
   payer: PublicKey,
-  peer: PublicKey
+  peer: PublicKey,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const [userA, userB] = canonicalOrder(payer, peer);
-  const relationship = getRelationshipPDA(payer, peer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const [userA, userB] = canonicalOrder(authority, peer);
+  const relationship = getRelationshipPDA(authority, peer);
 
   const data = DISCRIMINATORS.unblock;
 
   return new TransactionInstruction({
     keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
       { pubkey: peer, isSigner: false, isWritable: false },
       { pubkey: userA, isSigner: false, isWritable: false },
       { pubkey: userB, isSigner: false, isWritable: false },
       { pubkey: relationship, isSigner: false, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
     data,
@@ -327,20 +429,24 @@ export function createUnblockInstruction(
  */
 export function createCloseRelationshipInstruction(
   payer: PublicKey,
-  peer: PublicKey
+  peer: PublicKey,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const [userA, userB] = canonicalOrder(payer, peer);
-  const relationship = getRelationshipPDA(payer, peer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const [userA, userB] = canonicalOrder(authority, peer);
+  const relationship = getRelationshipPDA(authority, peer);
 
   const data = DISCRIMINATORS.close_relationship;
 
   return new TransactionInstruction({
     keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
       { pubkey: peer, isSigner: false, isWritable: false },
       { pubkey: userA, isSigner: false, isWritable: false },
       { pubkey: userB, isSigner: false, isWritable: false },
       { pubkey: relationship, isSigner: false, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
     data,
@@ -349,15 +455,19 @@ export function createCloseRelationshipInstruction(
 
 /**
  * Build update_profile instruction
+ * @param session - Optional session info. If provided, sessionKey signs instead of wallet.
  */
 export function createUpdateProfileInstruction(
   payer: PublicKey,
   displayName: string | null,
   avatarType: 'Emoji' | 'Nft' | null,
   avatarData: string | null,
-  encryptionPublicKey: Uint8Array | null
+  encryptionPublicKey: Uint8Array | null,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const userProfile = getUserProfilePDA(payer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const userProfile = getUserProfilePDA(authority);
 
   // Serialize instruction data: discriminator + Option<String> + Option<AvatarType> + Option<String> + Option<[u8; 32]>
   const parts: Buffer[] = [DISCRIMINATORS.update_profile];
@@ -396,12 +506,17 @@ export function createUpdateProfileInstruction(
 
   const data = Buffer.concat(parts);
 
+  const keys = [
+    { pubkey: userProfile, isSigner: false, isWritable: true },
+    { pubkey: authority, isSigner: !session, isWritable: false },
+    { pubkey: signer, isSigner: true, isWritable: true },
+    // session_token: Option<Account> — pass PDA if session, else program ID for None
+    { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  ];
+
   return new TransactionInstruction({
-    keys: [
-      { pubkey: userProfile, isSigner: false, isWritable: true },
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
+    keys,
     programId: PROGRAM_ID,
     data,
   });
@@ -435,8 +550,10 @@ export function createCreateGroupInstruction(
   groupId: Uint8Array,
   name: string,
   encryptionPubkey: Uint8Array,
-  tokenGate: { mint: PublicKey; minBalance: bigint } | null
+  tokenGate: { mint: PublicKey; minBalance: bigint } | null,
+  session?: SessionInfo
 ): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
   const group = getGroupPDA(groupId);
 
   const data = Buffer.concat([
@@ -450,7 +567,8 @@ export function createCreateGroupInstruction(
   return new TransactionInstruction({
     keys: [
       { pubkey: group, isSigner: false, isWritable: true },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
@@ -465,21 +583,21 @@ export function createUpdateGroupInstruction(
   payer: PublicKey,
   groupId: Uint8Array,
   name: string | null,
-  tokenGate: { mint: PublicKey; minBalance: bigint } | null
+  tokenGate: { mint: PublicKey; minBalance: bigint } | null,
+  session?: SessionInfo
 ): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
   const group = getGroupPDA(groupId);
 
   const parts: Buffer[] = [DISCRIMINATORS.update_group];
 
-  // Serialize Option<String> for name
   if (name !== null) {
-    parts.push(Buffer.from([1])); // Some
+    parts.push(Buffer.from([1]));
     parts.push(serializeString(name));
   } else {
-    parts.push(Buffer.from([0])); // None
+    parts.push(Buffer.from([0]));
   }
 
-  // Serialize Option<TokenGate>
   parts.push(serializeOptionTokenGate(tokenGate));
 
   const data = Buffer.concat(parts);
@@ -487,7 +605,8 @@ export function createUpdateGroupInstruction(
   return new TransactionInstruction({
     keys: [
       { pubkey: group, isSigner: false, isWritable: true },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
@@ -501,8 +620,10 @@ export function createUpdateGroupInstruction(
 export function createInviteToGroupInstruction(
   payer: PublicKey,
   groupId: Uint8Array,
-  invitee: PublicKey
+  invitee: PublicKey,
+  session?: SessionInfo
 ): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
   const group = getGroupPDA(groupId);
   const groupInvite = getGroupInvitePDA(groupId, invitee);
 
@@ -513,7 +634,8 @@ export function createInviteToGroupInstruction(
       { pubkey: group, isSigner: false, isWritable: true },
       { pubkey: groupInvite, isSigner: false, isWritable: true },
       { pubkey: invitee, isSigner: false, isWritable: false },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
@@ -527,25 +649,25 @@ export function createInviteToGroupInstruction(
 export function createAcceptGroupInviteInstruction(
   payer: PublicKey,
   groupId: Uint8Array,
-  userTokenAccount: PublicKey | null
+  userTokenAccount: PublicKey | null,
+  session?: SessionInfo
 ): TransactionInstruction {
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
   const group = getGroupPDA(groupId);
-  const groupInvite = getGroupInvitePDA(groupId, payer);
+  const groupInvite = getGroupInvitePDA(groupId, authority);
   const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 
   const data = DISCRIMINATORS.accept_group_invite;
 
-  // IMPORTANT: Anchor Option<Account> requires ALWAYS passing an account
-  // For None: pass program ID as placeholder
-  // For Some: pass actual account
   const keys = [
     { pubkey: group, isSigner: false, isWritable: true },
     { pubkey: groupInvite, isSigner: false, isWritable: true },
-    // ALWAYS include user_token_account - use program ID for None
     { pubkey: userTokenAccount ?? PROGRAM_ID, isSigner: false, isWritable: false },
-    { pubkey: payer, isSigner: true, isWritable: true },
+    { pubkey: authority, isSigner: !session, isWritable: false },
+    { pubkey: signer, isSigner: true, isWritable: true },
+    { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    // ALWAYS include token_program - use program ID for None
     { pubkey: userTokenAccount ? TOKEN_PROGRAM_ID : PROGRAM_ID, isSigner: false, isWritable: false },
   ];
 
@@ -561,16 +683,21 @@ export function createAcceptGroupInviteInstruction(
  */
 export function createRejectGroupInviteInstruction(
   payer: PublicKey,
-  groupId: Uint8Array
+  groupId: Uint8Array,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const groupInvite = getGroupInvitePDA(groupId, payer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const groupInvite = getGroupInvitePDA(groupId, authority);
 
   const data = DISCRIMINATORS.reject_group_invite;
 
   return new TransactionInstruction({
     keys: [
       { pubkey: groupInvite, isSigner: false, isWritable: true },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: authority, isSigner: !session, isWritable: false },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
     data,
@@ -582,8 +709,10 @@ export function createRejectGroupInviteInstruction(
  */
 export function createLeaveGroupInstruction(
   payer: PublicKey,
-  groupId: Uint8Array
+  groupId: Uint8Array,
+  session?: SessionInfo
 ): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
   const group = getGroupPDA(groupId);
 
   const data = DISCRIMINATORS.leave_group;
@@ -591,7 +720,8 @@ export function createLeaveGroupInstruction(
   return new TransactionInstruction({
     keys: [
       { pubkey: group, isSigner: false, isWritable: true },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
@@ -605,8 +735,10 @@ export function createLeaveGroupInstruction(
 export function createKickMemberInstruction(
   payer: PublicKey,
   groupId: Uint8Array,
-  member: PublicKey
+  member: PublicKey,
+  session?: SessionInfo
 ): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
   const group = getGroupPDA(groupId);
 
   const data = DISCRIMINATORS.kick_member;
@@ -615,7 +747,8 @@ export function createKickMemberInstruction(
     keys: [
       { pubkey: group, isSigner: false, isWritable: true },
       { pubkey: member, isSigner: false, isWritable: false },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
@@ -628,8 +761,10 @@ export function createKickMemberInstruction(
  */
 export function createCloseGroupInstruction(
   payer: PublicKey,
-  groupId: Uint8Array
+  groupId: Uint8Array,
+  session?: SessionInfo
 ): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
   const group = getGroupPDA(groupId);
 
   const data = DISCRIMINATORS.close_group;
@@ -637,7 +772,8 @@ export function createCloseGroupInstruction(
   return new TransactionInstruction({
     keys: [
       { pubkey: group, isSigner: false, isWritable: true },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
     data,
@@ -651,33 +787,37 @@ export function createStoreGroupKeyInstruction(
   payer: PublicKey,
   groupId: Uint8Array,
   encryptedKey: Uint8Array,
-  nonce: Uint8Array
+  nonce: Uint8Array,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const groupKeyShare = getGroupKeySharePDA(groupId, payer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const groupKeyShare = getGroupKeySharePDA(groupId, authority);
   const group = getGroupPDA(groupId);
 
-  // Build instruction data: discriminator + group_id + encrypted_key (Vec<u8>) + nonce
   const encryptedKeyBuffer = Buffer.from(encryptedKey);
   const nonceBuffer = Buffer.from(nonce);
 
   const data = Buffer.concat([
     DISCRIMINATORS.store_group_key,
-    Buffer.from(groupId), // 32 bytes
+    Buffer.from(groupId),
     Buffer.from([
       encryptedKeyBuffer.length & 0xff,
       (encryptedKeyBuffer.length >> 8) & 0xff,
       (encryptedKeyBuffer.length >> 16) & 0xff,
       (encryptedKeyBuffer.length >> 24) & 0xff,
-    ]), // Vec length prefix (4 bytes little-endian)
+    ]),
     encryptedKeyBuffer,
-    nonceBuffer, // 24 bytes
+    nonceBuffer,
   ]);
 
   return new TransactionInstruction({
     keys: [
       { pubkey: groupKeyShare, isSigner: false, isWritable: true },
       { pubkey: group, isSigner: false, isWritable: false },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: authority, isSigner: !session, isWritable: false },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
@@ -690,16 +830,21 @@ export function createStoreGroupKeyInstruction(
  */
 export function createCloseGroupKeyInstruction(
   payer: PublicKey,
-  groupId: Uint8Array
+  groupId: Uint8Array,
+  session?: SessionInfo
 ): TransactionInstruction {
-  const groupKeyShare = getGroupKeySharePDA(groupId, payer);
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const groupKeyShare = getGroupKeySharePDA(groupId, authority);
 
   const data = DISCRIMINATORS.close_group_key;
 
   return new TransactionInstruction({
     keys: [
       { pubkey: groupKeyShare, isSigner: false, isWritable: true },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: authority, isSigner: !session, isWritable: false },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
     data,
@@ -711,19 +856,18 @@ export function createStoreGroupKeyForMemberInstruction(
   groupId: Uint8Array,
   member: PublicKey,
   encryptedKey: Uint8Array,
-  nonce: Uint8Array
+  nonce: Uint8Array,
+  session?: SessionInfo
 ): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
   const groupKeyShare = getGroupKeySharePDA(groupId, member);
   const group = getGroupPDA(groupId);
 
   const encryptedKeyBuffer = Buffer.from(encryptedKey);
   const nonceBuffer = Buffer.from(nonce);
 
-  // TODO: Update discriminator after program rebuild via update-discriminators.js
-  const discriminator = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-
   const data = Buffer.concat([
-    discriminator,
+    DISCRIMINATORS.store_group_key_for_member,
     Buffer.from(groupId),
     Buffer.from(member.toBytes()),
     Buffer.from([
@@ -740,7 +884,8 @@ export function createStoreGroupKeyForMemberInstruction(
     keys: [
       { pubkey: groupKeyShare, isSigner: false, isWritable: true },
       { pubkey: group, isSigner: false, isWritable: false },
-      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     programId: PROGRAM_ID,
