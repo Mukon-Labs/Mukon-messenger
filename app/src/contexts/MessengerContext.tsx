@@ -81,6 +81,25 @@ import { initializeNotifications, sendMessageNotification } from '../utils/notif
 // - Fallback to regular PDA operations for hackathon demo
 const USE_ZK_COMPRESSION = false;
 
+/**
+ * Parse the encryption public key from a UserProfile account's raw data.
+ * Layout: discriminator(8) + owner(32) + name_len(4) + name(N) + avatar_type(1) + avatar_len(4) + avatar(M) + enc_pubkey(32)
+ * NOTE: Cannot use data.slice(data.length - 32) because Anchor allocates fixed space with trailing zeros.
+ */
+function parseEncryptionPubkey(data: Buffer): Uint8Array | null {
+  try {
+    let offset = 8 + 32; // skip discriminator + owner
+    const nameLen = data.readUInt32LE(offset);
+    offset += 4 + nameLen; // skip name length + name
+    offset += 1; // skip avatar_type
+    const avatarLen = data.readUInt32LE(offset);
+    offset += 4 + avatarLen; // skip avatar length + avatar
+    return new Uint8Array(data.slice(offset, offset + 32));
+  } catch {
+    return null;
+  }
+}
+
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 
 export interface Contact {
@@ -194,6 +213,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   const [sessionKeypair, setSessionKeypair] = useState<Keypair | null>(null);
   const sessionInfoRef = useRef<SessionInfo | null>(null);
   const sessionKeypairRef = useRef<Keypair | null>(null);
+  const backupInFlightRef = useRef<Set<string>>(new Set()); // Prevent duplicate on-chain backups
 
   // Refs for socket handlers to avoid stale closures (Fix 2b, 2d, Fix 7)
   const encryptionKeysRef = useRef<nacl.BoxKeyPair | null>(null);
@@ -639,8 +659,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
               const creatorAccount = await connection.getAccountInfo(creatorProfilePDA);
               if (creatorAccount) {
                 const data = creatorAccount.data;
-                senderEncPubkey = new Uint8Array(data.slice(data.length - 32));
-                console.log(`🔑 Using admin's encryption key for decryption`);
+                senderEncPubkey = parseEncryptionPubkey(data) ?? undefined;
+                if (senderEncPubkey) console.log(`🔑 Using admin's encryption key for decryption`);
               }
             } catch (fetchErr) {
               console.error('Failed to fetch admin encryption key:', fetchErr);
@@ -1069,7 +1089,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
                     const profilePDA = getUserProfilePDA(member);
                     const profileAccount = await connection.getAccountInfo(profilePDA);
                     if (profileAccount) {
-                      memberEncPubkey = new Uint8Array(profileAccount.data.slice(profileAccount.data.length - 32));
+                      memberEncPubkey = parseEncryptionPubkey(profileAccount.data) ?? undefined;
                     }
                   }
                   if (memberEncPubkey) {
@@ -1212,12 +1232,18 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
               // This ensures the key survives even if socket delivery fails for future requests
               setTimeout(async () => {
                 try {
+                  // In-memory guard prevents duplicate concurrent backup attempts
+                  if (backupInFlightRef.current.has(groupId)) {
+                    console.log('⏭️ Group key backup already in progress, skipping');
+                    return;
+                  }
                   const backupKey = `groupKeyBackedUp_${wallet!.publicKey!.toBase58()}_${groupId}`;
                   const alreadyBackedUp = await AsyncStorage.getItem(backupKey);
                   if (alreadyBackedUp === 'true') {
                     console.log('⏭️ Group key already backed up on-chain, skipping');
                     return;
                   }
+                  backupInFlightRef.current.add(groupId);
 
                   console.log('💾 Backing up group key on-chain (mandatory for recovery)...');
 
@@ -1261,6 +1287,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
                 } catch (error) {
                   console.error('⚠️ Failed to backup group key on-chain:', error);
                   // Non-fatal - local key still works, but recovery won't be possible
+                } finally {
+                  backupInFlightRef.current.delete(groupId);
                 }
               }, 2000); // 2s delay to avoid immediate wallet prompt after key share
             } else {
@@ -1300,8 +1328,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           const profilePDA = getUserProfilePDA(requesterPubkeyObj);
           const profileAccount = await connection.getAccountInfo(profilePDA);
           if (profileAccount) {
-            const data = profileAccount.data;
-            requesterEncryptionPubkey = new Uint8Array(data.slice(data.length - 32));
+            requesterEncryptionPubkey = parseEncryptionPubkey(profileAccount.data) ?? undefined;
           }
         }
 
@@ -2382,10 +2409,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
               const profileAccount = await connection.getAccountInfo(profilePDA);
 
               if (profileAccount) {
-                // UserProfile layout: discriminator(8) + owner(32) + name(4+len) + avatar_type(1) + avatar_data(4+len) + encryption_pubkey(32)
-                // We need the last 32 bytes
-                const data = profileAccount.data;
-                inviteeEncryptionPubkey = new Uint8Array(data.slice(data.length - 32));
+                inviteeEncryptionPubkey = parseEncryptionPubkey(profileAccount.data) ?? undefined;
               }
             }
 
@@ -2497,8 +2521,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           const profileAccount = await connection.getAccountInfo(profilePDA);
 
           if (profileAccount) {
-            const data = profileAccount.data;
-            inviteeEncryptionPubkey = new Uint8Array(data.slice(data.length - 32));
+            inviteeEncryptionPubkey = parseEncryptionPubkey(profileAccount.data) ?? undefined;
           }
         }
 
@@ -2822,8 +2845,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
                 const profilePDA = getUserProfilePDA(member);
                 const profileAccount = await connection.getAccountInfo(profilePDA);
                 if (profileAccount) {
-                  const data = profileAccount.data;
-                  memberEncPubkey = new Uint8Array(data.slice(data.length - 32));
+                  memberEncPubkey = parseEncryptionPubkey(profileAccount.data) ?? undefined;
                 }
               }
 
