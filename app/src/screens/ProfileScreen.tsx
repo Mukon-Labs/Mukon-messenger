@@ -5,7 +5,8 @@ import { theme } from '../theme';
 import { truncateAddress } from '../utils/encryption';
 import { useWallet } from '../contexts/WalletContext';
 import { useMessenger } from '../contexts/MessengerContext';
-import EmojiPicker from '../components/EmojiPicker';
+import EmojiPicker, { AvatarSelection } from '../components/EmojiPicker';
+import AvatarDisplay from '../components/AvatarDisplay';
 import { useDarkAlert } from '../components/DarkAlert';
 import { useNavigation } from '@react-navigation/native';
 
@@ -17,8 +18,11 @@ export default function ProfileScreen() {
   const [displayName, setDisplayName] = React.useState('');
   const [emojiPickerVisible, setEmojiPickerVisible] = React.useState(false);
   const [selectedEmoji, setSelectedEmoji] = React.useState<string | null>(null);
+  const [avatarType, setAvatarType] = React.useState<'Emoji' | 'Nft'>('Emoji');
+  const [nftMint, setNftMint] = React.useState<string | null>(null);
   const [initialName, setInitialName] = React.useState('');
   const [initialEmoji, setInitialEmoji] = React.useState<string | null>(null);
+  const [initialAvatarType, setInitialAvatarType] = React.useState<'Emoji' | 'Nft'>('Emoji');
 
   React.useEffect(() => {
     if (messenger.profile) {
@@ -28,23 +32,38 @@ export default function ProfileScreen() {
       setSelectedEmoji(emoji);
       setInitialName(name);
       setInitialEmoji(emoji);
+      // TODO: detect NFT avatar type from profile when backend supports it
     }
   }, [messenger.profile]);
 
-  const hasUnsavedChanges = displayName !== initialName || selectedEmoji !== initialEmoji;
+  const hasUnsavedChanges = displayName !== initialName || selectedEmoji !== initialEmoji || avatarType !== initialAvatarType;
+
+  const handleAvatarSelect = (selection: AvatarSelection) => {
+    if (selection.type === 'emoji') {
+      setSelectedEmoji(selection.value);
+      setAvatarType('Emoji');
+      setNftMint(null);
+    } else {
+      setSelectedEmoji(selection.mint); // Store mint as avatar_data
+      setAvatarType('Nft');
+      setNftMint(selection.mint);
+    }
+  };
 
   const handleEmojiSelect = (emoji: string) => {
     setSelectedEmoji(emoji);
-    // No transaction here - save on button press
+    setAvatarType('Emoji');
+    setNftMint(null);
   };
 
   const saveProfile = async () => {
     if (!hasUnsavedChanges) return;
 
     try {
-      await messenger.updateProfile(displayName.trim(), 'Emoji', selectedEmoji || undefined);
+      await messenger.updateProfile(displayName.trim(), avatarType, selectedEmoji || undefined);
       setInitialName(displayName.trim());
       setInitialEmoji(selectedEmoji);
+      setInitialAvatarType(avatarType);
       showAlert('Success', 'Profile updated!');
     } catch (error: any) {
       showAlert('Error', 'Failed to update profile');
@@ -75,17 +94,12 @@ export default function ProfileScreen() {
     <ScrollView style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => setEmojiPickerVisible(true)}>
-          {selectedEmoji ? (
-            <View style={styles.emojiAvatar}>
-              <Text style={styles.emojiAvatarText}>{selectedEmoji}</Text>
-            </View>
-          ) : (
-            <Avatar.Text
-              size={96}
-              label={displayName ? displayName[0].toUpperCase() : walletAddress ? walletAddress[0].toUpperCase() : '?'}
-              style={styles.avatar}
-            />
-          )}
+          <AvatarDisplay
+            avatar={selectedEmoji}
+            avatarType={avatarType}
+            size={96}
+            name={displayName || walletAddress}
+          />
           <Text style={styles.changeAvatarText}>Tap to change avatar</Text>
         </TouchableOpacity>
 
@@ -165,6 +179,7 @@ export default function ProfileScreen() {
         visible={emojiPickerVisible}
         onDismiss={() => setEmojiPickerVisible(false)}
         onSelect={handleEmojiSelect}
+        onSelectAvatar={handleAvatarSelect}
       />
       {DarkAlertComponent}
     </ScrollView>

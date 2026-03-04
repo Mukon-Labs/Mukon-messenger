@@ -6,6 +6,7 @@ import { theme } from '../theme';
 import { useWallet } from '../contexts/WalletContext';
 import { useMessenger } from '../contexts/MessengerContext';
 import { truncateAddress } from '../utils/encryption';
+import AvatarDisplay from './AvatarDisplay';
 
 export default function CustomDrawer({ navigation }: any) {
   const wallet = useWallet();
@@ -21,17 +22,7 @@ export default function CustomDrawer({ navigation }: any) {
         style={styles.profileSection}
         onPress={() => navigation.navigate('Profile')}
       >
-        {avatarUrl && Array.from(avatarUrl).length === 1 ? (
-          <View style={styles.emojiAvatar}>
-            <Text style={styles.emojiAvatarText}>{avatarUrl}</Text>
-          </View>
-        ) : (
-          <Avatar.Icon
-            size={64}
-            icon="account-circle"
-            style={styles.avatar}
-          />
-        )}
+        <AvatarDisplay avatar={avatarUrl} size={64} name={displayName} />
         {displayName && (
           <Text style={styles.displayName}>{displayName}</Text>
         )}

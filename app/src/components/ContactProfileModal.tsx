@@ -3,6 +3,8 @@ import { View, StyleSheet, Modal, ScrollView } from 'react-native';
 import { Text, IconButton, Divider, Button, TextInput } from 'react-native-paper';
 import * as Clipboard from 'expo-clipboard';
 import { theme } from '../theme';
+import SendCryptoModal from './SendCryptoModal';
+import AvatarDisplay from './AvatarDisplay';
 
 interface GroupInCommon {
   name: string;
@@ -45,6 +47,7 @@ export default function ContactProfileModal({
 }: ContactProfileModalProps) {
   const [editingName, setEditingName] = useState(false);
   const [tempName, setTempName] = useState(displayName);
+  const [sendCryptoVisible, setSendCryptoVisible] = useState(false);
 
   const handleCopyAddress = async () => {
     await Clipboard.setStringAsync(walletAddress);
@@ -81,15 +84,7 @@ export default function ContactProfileModal({
         <ScrollView contentContainerStyle={styles.scrollContent}>
           {/* Avatar */}
           <View style={styles.avatarContainer}>
-            {avatar && Array.from(avatar).length === 1 ? (
-              <Text style={styles.avatarEmoji}>{avatar}</Text>
-            ) : (
-              <View style={styles.avatarFallback}>
-                <Text style={styles.avatarFallbackText}>
-                  {displayName[0]?.toUpperCase() || '?'}
-                </Text>
-              </View>
-            )}
+            <AvatarDisplay avatar={avatar} size={96} name={displayName} />
           </View>
 
           {/* Display Name with Edit */}
@@ -181,16 +176,21 @@ export default function ContactProfileModal({
             </>
           )}
 
-          {/* Send Crypto Button (Disabled - Coming Soon) */}
+          {/* Send Crypto */}
           <Button
             mode="outlined"
-            disabled
+            onPress={() => setSendCryptoVisible(true)}
             style={styles.actionButton}
             contentStyle={styles.actionButtonContent}
-            labelStyle={styles.disabledButtonLabel}
           >
-            Send Crypto (Coming Soon)
+            Send Crypto
           </Button>
+          <SendCryptoModal
+            visible={sendCryptoVisible}
+            onDismiss={() => setSendCryptoVisible(false)}
+            recipientPubkey={walletAddress}
+            recipientName={displayName}
+          />
 
           <Divider style={styles.divider} />
 

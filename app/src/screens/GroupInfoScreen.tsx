@@ -8,6 +8,7 @@ import { Buffer } from 'buffer';
 import { theme } from '../theme';
 import EmojiPicker from '../components/EmojiPicker';
 import ContactProfileModal from '../components/ContactProfileModal';
+import AvatarDisplay from '../components/AvatarDisplay';
 import { getGroupAvatar, setGroupAvatar, getGroupLocalName, setGroupLocalName, getContactCustomName, getCachedDomain, setContactCustomName } from '../utils/domains';
 import { getUserProfilePDA } from '../utils/transactions';
 import { useDarkAlert } from '../components/DarkAlert';
@@ -269,13 +270,7 @@ export default function GroupInfoScreen() {
           onPress={() => isMember && setEmojiPickerVisible(true)}
           disabled={!isMember}
         >
-          {groupAvatar ? (
-            <View style={styles.avatarContainer}>
-              <Text style={styles.avatarEmoji}>{groupAvatar}</Text>
-            </View>
-          ) : (
-            <Avatar.Text size={80} label={(displayName || 'GR').slice(0, 2).toUpperCase()} />
-          )}
+          <AvatarDisplay avatar={groupAvatar} size={80} name={displayName || 'GR'} />
           {isMember && (
             <Text style={styles.avatarHint}>Tap to change</Text>
           )}
@@ -355,18 +350,10 @@ export default function GroupInfoScreen() {
                 });
                 setProfileModalVisible(true);
               }}
-              left={(props) => (
-                memberAvatar && Array.from(memberAvatar).length === 1 ? (
-                  <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: theme.colors.surface, justifyContent: 'center', alignItems: 'center' }}>
-                    <Text style={{ fontSize: 24 }}>{memberAvatar}</Text>
-                  </View>
-                ) : (
-                  <Avatar.Text
-                    {...props}
-                    size={40}
-                    label={memberName[0]?.toUpperCase() || '?'}
-                  />
-                )
+              left={() => (
+                <View style={{ justifyContent: 'center', marginLeft: 8 }}>
+                  <AvatarDisplay avatar={memberAvatar} size={40} name={memberName} />
+                </View>
               )}
               right={
                 isAdmin && !isSelf && !isCreator

@@ -8,11 +8,18 @@ import { useMessenger } from '../contexts/MessengerContext';
 import { resolveDomain, isDomain, cacheResolvedDomain } from '../utils/domains';
 import { useDarkAlert } from '../components/DarkAlert';
 
-export default function AddContactScreen({ navigation }: any) {
+export default function AddContactScreen({ navigation, route }: any) {
   const wallet = useWallet();
   const messenger = useMessenger();
   const { showAlert, DarkAlertComponent } = useDarkAlert();
   const [address, setAddress] = React.useState('');
+
+  // Consume scanned address from QR scanner
+  React.useEffect(() => {
+    if (route?.params?.scannedAddress) {
+      setAddress(route.params.scannedAddress);
+    }
+  }, [route?.params?.scannedAddress]);
   const [loading, setLoading] = React.useState(false);
 
   const sendInvitation = async () => {
@@ -186,10 +193,7 @@ export default function AddContactScreen({ navigation }: any) {
             icon="qrcode-scan"
             size={48}
             iconColor={theme.colors.textSecondary}
-            onPress={() => {
-              // TODO: Implement QR scanner
-              console.log('Open QR scanner');
-            }}
+            onPress={() => navigation.navigate('QRScanner')}
           />
           <Text style={styles.qrText}>Scan QR</Text>
         </View>
@@ -199,13 +203,7 @@ export default function AddContactScreen({ navigation }: any) {
             icon="qrcode"
             size={48}
             iconColor={theme.colors.primary}
-            onPress={() => {
-              // TODO: Implement show my QR
-              showAlert(
-                'Show My QR',
-                `Your wallet address:\n${wallet.publicKey?.toBase58()}\n\n(QR display coming soon)`
-              );
-            }}
+            onPress={() => navigation.navigate('QRCodeDisplay')}
           />
           <Text style={styles.qrText}>Show My QR</Text>
         </View>

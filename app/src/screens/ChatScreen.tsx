@@ -13,6 +13,7 @@ import { getContactCustomName, getCachedDomain, setContactCustomName } from '../
 import ReactionPicker from '../components/ReactionPicker';
 import ChatBackground from '../components/ChatBackground';
 import ContactProfileModal from '../components/ContactProfileModal';
+import AvatarDisplay from '../components/AvatarDisplay';
 import { useDarkAlert } from '../components/DarkAlert';
 import { useCall } from '../contexts/CallContext';
 
@@ -245,15 +246,7 @@ export default function ChatScreen({ route, navigation }: any) {
           }}
         >
           <View style={styles.headerTitle}>
-            {contact.avatar && Array.from(contact.avatar).length === 1 ? (
-              <Text style={styles.headerAvatar}>{contact.avatar}</Text>
-            ) : (
-              <View style={styles.headerAvatarFallback}>
-                <Text style={styles.headerAvatarFallbackText}>
-                  {(displayName || contact.pubkey || '?')[0].toUpperCase()}
-                </Text>
-              </View>
-            )}
+            <AvatarDisplay avatar={contact.avatar} size={32} name={displayName || contact.pubkey} />
             <Text style={styles.headerName}>
               {displayName}
             </Text>
@@ -403,13 +396,7 @@ export default function ChatScreen({ route, navigation }: any) {
         {/* Avatar for incoming messages only */}
         {showAvatar && (
           <View style={styles.messageAvatar}>
-            {contact.avatar && Array.from(contact.avatar).length === 1 ? (
-              <Text style={styles.messageAvatarEmoji}>{contact.avatar}</Text>
-            ) : (
-              <Text style={styles.messageAvatarFallback}>
-                {(displayName || contact.pubkey || '?')[0].toUpperCase()}
-              </Text>
-            )}
+            <AvatarDisplay avatar={contact.avatar} size={32} name={displayName || contact.pubkey} />
           </View>
         )}
 

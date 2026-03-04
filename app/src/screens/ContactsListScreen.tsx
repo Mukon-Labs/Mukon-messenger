@@ -9,6 +9,7 @@ import { useMessenger } from '../contexts/MessengerContext';
 import { useContactNames } from '../hooks/useContactNames';
 import { getChatHash } from '../utils/encryption';
 import { useCall } from '../contexts/CallContext';
+import AvatarDisplay from '../components/AvatarDisplay';
 
 export default function ContactsListScreen({ navigation }: any) {
   const wallet = useWallet();
@@ -143,20 +144,11 @@ export default function ContactsListScreen({ navigation }: any) {
                 <List.Item
                   title={displayText}
                   description={undefined}
-                  left={(props) => (
-                  item.avatar && Array.from(item.avatar).length === 1 ? (
-                    <View style={styles.avatarContainer}>
-                      <Text style={styles.avatarEmoji}>{item.avatar}</Text>
+                  left={() => (
+                    <View style={{ justifyContent: 'center', marginLeft: 8 }}>
+                      <AvatarDisplay avatar={item.avatar} size={48} name={item.displayName} />
                     </View>
-                  ) : (
-                    <Avatar.Text
-                      {...props}
-                      size={48}
-                      label={item.displayName[0]?.toUpperCase() || '?'}
-                      style={{ backgroundColor: theme.colors.primary }}
-                    />
-                  )
-                )}
+                  )}
                 right={() => (
                     <IconButton
                       icon="phone"
