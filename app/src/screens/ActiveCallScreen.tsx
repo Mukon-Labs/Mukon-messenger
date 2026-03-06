@@ -10,12 +10,12 @@ interface ActiveCallScreenProps {
 
 export default function ActiveCallScreen({ visible }: ActiveCallScreenProps) {
   const theme = useTheme();
-  const { partner, startTime, isMuted, isSpeakerOn, toggleMute, toggleSpeaker, endCall } = useCall();
+  const { status, partner, startTime, isMuted, isSpeakerOn, toggleMute, toggleSpeaker, endCall } = useCall();
   const [callDuration, setCallDuration] = useState('00:00');
 
   useEffect(() => {
     if (!startTime) {
-      setCallDuration('00:00');
+      setCallDuration(status === 'calling' ? 'Calling...' : '00:00');
       return;
     }
 
@@ -27,7 +27,7 @@ export default function ActiveCallScreen({ visible }: ActiveCallScreenProps) {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [startTime]);
+  }, [startTime, status]);
 
   if (!visible || !partner) return null;
 

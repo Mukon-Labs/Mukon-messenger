@@ -26,7 +26,14 @@
         "backgroundColor": "#0D0D0D"
       },
       "package": "com.mukon.messenger",
-      "usesCleartextTraffic": true
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.VIBRATE"
+      ]
     },
     "web": {
       "favicon": "../assets/ICON.png"

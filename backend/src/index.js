@@ -851,6 +851,67 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ========== VOICE CALL SIGNALING (pure relay, no DB) ==========
+
+  socket.on('call_offer', ({ callId, targetPubkey, sdp }) => {
+    if (!socket.publicKey) return;
+    const targetSocketId = onlineUsers.get(targetPubkey);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call_offer', {
+        callId,
+        callerPubkey: socket.publicKey,
+        sdp,
+      });
+      console.log(`📞 Call offer ${callId.slice(0, 8)}... from ${socket.publicKey.slice(0, 8)}... to ${targetPubkey.slice(0, 8)}...`);
+    } else {
+      socket.emit('call_busy', { callId, reason: 'offline' });
+      console.log(`📞 Call ${callId.slice(0, 8)}... target ${targetPubkey.slice(0, 8)}... is offline`);
+    }
+  });
+
+  socket.on('call_answer', ({ callId, targetPubkey, sdp }) => {
+    if (!socket.publicKey) return;
+    const targetSocketId = onlineUsers.get(targetPubkey);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call_answer', { callId, sdp });
+      console.log(`📞 Call answer ${callId.slice(0, 8)}... from ${socket.publicKey.slice(0, 8)}...`);
+    }
+  });
+
+  socket.on('call_ice_candidate', ({ callId, targetPubkey, candidate }) => {
+    if (!socket.publicKey) return;
+    const targetSocketId = onlineUsers.get(targetPubkey);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call_ice_candidate', { callId, candidate });
+    }
+  });
+
+  socket.on('call_decline', ({ callId, targetPubkey }) => {
+    if (!socket.publicKey) return;
+    const targetSocketId = onlineUsers.get(targetPubkey);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call_decline', { callId });
+      console.log(`📞 Call ${callId.slice(0, 8)}... declined by ${socket.publicKey.slice(0, 8)}...`);
+    }
+  });
+
+  socket.on('call_end', ({ callId, targetPubkey }) => {
+    if (!socket.publicKey) return;
+    const targetSocketId = onlineUsers.get(targetPubkey);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call_end', { callId });
+      console.log(`📞 Call ${callId.slice(0, 8)}... ended by ${socket.publicKey.slice(0, 8)}...`);
+    }
+  });
+
+  socket.on('call_busy', ({ callId, targetPubkey }) => {
+    if (!socket.publicKey) return;
+    const targetSocketId = onlineUsers.get(targetPubkey);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call_busy', { callId, reason: 'busy' });
+    }
+  });
+
   socket.on('disconnect', () => {
     if (socket.publicKey) {
       onlineUsers.delete(socket.publicKey);

@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, StyleSheet, Modal } from 'react-native';
+import { Modal } from 'react-native';
 import { useCall } from '../contexts/CallContext';
 import IncomingCallModal from '../components/IncomingCallModal';
 import ActiveCallScreen from '../screens/ActiveCallScreen';
@@ -10,7 +10,7 @@ export default function CallUIOverlay() {
   // Show incoming call modal
   const showIncomingCall = status === 'ringing' && partner;
 
-  // Show active call screen
+  // Show active call screen (calling = outgoing ring, active = connected)
   const showActiveCall = status === 'active' || status === 'calling';
 
   return (
@@ -18,10 +18,17 @@ export default function CallUIOverlay() {
       <IncomingCallModal
         visible={showIncomingCall}
         caller={partner}
-        onAccept={() => partner && acceptCall(partner)}
+        onAccept={acceptCall}
         onDecline={declineCall}
       />
-      <ActiveCallScreen visible={showActiveCall} />
+      <Modal
+        visible={showActiveCall}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={() => {}}
+      >
+        <ActiveCallScreen visible={showActiveCall} />
+      </Modal>
     </>
   );
 }
