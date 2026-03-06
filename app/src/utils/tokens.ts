@@ -1,4 +1,3 @@
-import { Buffer } from 'buffer';
 import {
   Connection,
   PublicKey,
@@ -6,12 +5,15 @@ import {
   TransactionInstruction,
   LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
-import {
-  TOKEN_PROGRAM_ID,
-  getAssociatedTokenAddressSync,
-  createAssociatedTokenAccountInstruction,
-  createTransferInstruction,
-} from '@solana/spl-token';
+
+// Lazy-load @solana/spl-token to avoid Buffer reference before polyfill runs
+let _splToken: typeof import('@solana/spl-token') | null = null;
+async function getSplToken() {
+  if (!_splToken) {
+    _splToken = await import('@solana/spl-token');
+  }
+  return _splToken;
+}
 
 export interface TokenBalance {
   mint: string;
@@ -34,6 +36,7 @@ export async function fetchTokenAccounts(
   connection: Connection,
   owner: PublicKey,
 ): Promise<TokenBalance[]> {
+  const { TOKEN_PROGRAM_ID } = await getSplToken();
   const response = await connection.getParsedTokenAccountsByOwner(owner, {
     programId: TOKEN_PROGRAM_ID,
   });
@@ -68,6 +71,12 @@ export async function createSPLTransferInstructions(
   mint: PublicKey,
   amount: bigint,
 ): Promise<TransactionInstruction[]> {
+  const {
+    getAssociatedTokenAddressSync,
+    createAssociatedTokenAccountInstruction,
+    createTransferInstruction,
+  } = await getSplToken();
+
   const instructions: TransactionInstruction[] = [];
 
   const senderATA = getAssociatedTokenAddressSync(mint, from);

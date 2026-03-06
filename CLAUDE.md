@@ -255,7 +255,6 @@ adb install -r app-debug.apk
 2. 🐛 **Unread message badges not incrementing** — Needs two-device testing with physical devices
 3. 🐛 **Read ticks not showing** — Backend emits `messages_read` but needs two-device testing
 4. **Domain resolution** — Needs mainnet testing with real .sol/.skr domains
-5. **All Alert.alert popups still white** — Need to replace 87 Alert.alert calls with DarkAlert component (9 files)
 
 **Fixed:**
 - ~~**Socket instability**~~ — FIXED (Feb 25): WebSocket-first, 1 Fly machine, encryption gate, no duplicate handlers

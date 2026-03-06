@@ -440,7 +440,6 @@ anchor test
 1. Domain resolution - Only tested on devnet (needs mainnet .sol domains)
 2. Light Protocol ZK Compression - Disabled on devnet due to indexer limitations (V2 architecture complete and mainnet-ready)
 3. Unread message badges - Need two-device testing
-4. Alert dialogs still white - 87 Alert.alert calls need DarkAlert component
 
 **Fixed (Previously Known):**
 - ~~Backend persistence~~ - Now uses Fly.io Postgres
