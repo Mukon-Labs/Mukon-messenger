@@ -4,7 +4,7 @@ import { useMessenger } from './MessengerContext';
 import { WebRTCCall } from '../utils/webrtc';
 
 // Types
-export type CallStatus = 'idle' | 'calling' | 'ringing' | 'active' | 'ended';
+export type CallStatus = 'idle' | 'calling' | 'ringing' | 'active' | 'ended' | 'unavailable' | 'declined';
 
 export interface Contact {
   id: string;
@@ -154,14 +154,15 @@ export function CallProvider({ children }: { children: ReactNode }) {
         sdp: offer,
       });
 
-      // 30s ring timeout
+      // 30s ring timeout — no answer
       ringTimeoutRef.current = setTimeout(() => {
         if (stateRef.current.status === 'calling') {
           socket.emit('call_end', {
             callId: callIdRef.current,
             targetPubkey: partnerPubkeyRef.current,
           });
-          endWithStatus();
+          cleanup();
+          setState(prev => ({ ...prev, status: 'unavailable' }));
         }
       }, 30000);
     } catch (err) {
@@ -346,8 +347,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         ringTimeoutRef.current = null;
       }
       cleanup();
-      setState(prev => ({ ...prev, status: 'ended' }));
-      setTimeout(() => setState(initialState), 1500);
+      setState(prev => ({ ...prev, status: 'declined' }));
     };
 
     // Call ended by other side
@@ -356,20 +356,18 @@ export function CallProvider({ children }: { children: ReactNode }) {
       console.log('📞 Call ended by remote');
       cleanup();
       setState(prev => ({ ...prev, status: 'ended' }));
-      setTimeout(() => setState(initialState), 1500);
     };
 
     // Target busy or offline
-    const handleBusy = ({ callId }: any) => {
+    const handleBusy = ({ callId, reason }: any) => {
       if (callId !== callIdRef.current) return;
-      console.log('📞 Call target busy/offline');
+      console.log('📞 Call target busy/offline:', reason);
       if (ringTimeoutRef.current) {
         clearTimeout(ringTimeoutRef.current);
         ringTimeoutRef.current = null;
       }
       cleanup();
-      setState(prev => ({ ...prev, status: 'ended' }));
-      setTimeout(() => setState(initialState), 1500);
+      setState(prev => ({ ...prev, status: 'unavailable' }));
     };
 
     socket.on('call_offer', handleOffer);

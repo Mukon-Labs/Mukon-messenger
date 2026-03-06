@@ -10,8 +10,8 @@ export default function CallUIOverlay() {
   // Show incoming call modal
   const showIncomingCall = status === 'ringing' && partner;
 
-  // Show active call screen (calling = outgoing ring, active = connected)
-  const showActiveCall = status === 'active' || status === 'calling';
+  // Show active call screen (calling, active, or terminal states until user dismisses)
+  const showActiveCall = status === 'active' || status === 'calling' || status === 'ended' || status === 'unavailable' || status === 'declined';
 
   return (
     <>

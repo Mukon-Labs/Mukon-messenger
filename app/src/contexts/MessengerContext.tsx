@@ -444,8 +444,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     if (!wallet?.publicKey) return;
     if (encryptionKeys) return; // Already have keys
 
-    // Check for signature from WalletProvider's connect()
-    const signature = (window as any).__mukonEncryptionSignature;
+    // Use wallet context's encryptionSignature (reactive) with global fallback
+    const signature = wallet.encryptionSignature || (window as any).__mukonEncryptionSignature;
     if (!signature) {
       console.warn('⚠️ No encryption signature available yet');
       return;
@@ -457,12 +457,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       setEncryptionKeys(keypair);
       setEncryptionReady(true);
       console.log('✅ Encryption keypair derived');
-
-      // DON'T delete signature - other components might need it
     } catch (error) {
       console.error('❌ Failed to derive encryption keys:', error);
     }
-  }, [wallet?.publicKey, encryptionKeys]);
+  }, [wallet?.publicKey, wallet?.encryptionSignature, encryptionKeys]);
 
   // ========== SESSION KEY LIFECYCLE ==========
   // After encryption is ready, load or create a session key for auto-signing

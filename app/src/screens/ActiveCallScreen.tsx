@@ -8,14 +8,24 @@ interface ActiveCallScreenProps {
   visible: boolean;
 }
 
+const STATUS_TEXT: Record<string, string> = {
+  calling: 'Calling...',
+  unavailable: 'Unavailable',
+  declined: 'Call Declined',
+  ended: 'Call Ended',
+};
+
 export default function ActiveCallScreen({ visible }: ActiveCallScreenProps) {
   const theme = useTheme();
-  const { status, partner, startTime, isMuted, isSpeakerOn, toggleMute, toggleSpeaker, endCall } = useCall();
+  const { status, partner, startTime, isMuted, isSpeakerOn, toggleMute, toggleSpeaker, endCall, resetCallState } = useCall();
   const [callDuration, setCallDuration] = useState('00:00');
+
+  const isTerminal = status === 'unavailable' || status === 'declined' || status === 'ended';
+  const isActive = status === 'active';
 
   useEffect(() => {
     if (!startTime) {
-      setCallDuration(status === 'calling' ? 'Calling...' : '00:00');
+      setCallDuration(STATUS_TEXT[status] || '00:00');
       return;
     }
 
@@ -35,7 +45,12 @@ export default function ActiveCallScreen({ visible }: ActiveCallScreenProps) {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.partnerName}>{partner.name}</Text>
-        <Text style={styles.callStatus}>{callDuration}</Text>
+        <Text style={[
+          styles.callStatus,
+          isTerminal && styles.callStatusError,
+        ]}>
+          {callDuration}
+        </Text>
       </View>
 
       <View style={styles.avatarContainer}>
@@ -46,39 +61,58 @@ export default function ActiveCallScreen({ visible }: ActiveCallScreenProps) {
         <Text style={styles.callType}>Voice Call</Text>
       </View>
 
-      <View style={styles.actionsContainer}>
-        <View style={styles.actionButton}>
-          <IconButton
-            icon={isMuted ? 'microphone-off' : 'microphone'}
-            iconColor={isMuted ? '#EF4444' : '#fff'}
-            size={28}
-            onPress={toggleMute}
-            style={[styles.iconButton, isMuted && styles.iconButtonActive]}
-          />
-          <Text style={styles.actionLabel}>{isMuted ? 'Unmute' : 'Mute'}</Text>
-        </View>
+      {isActive && (
+        <View style={styles.actionsContainer}>
+          <View style={styles.actionButton}>
+            <IconButton
+              icon={isMuted ? 'microphone-off' : 'microphone'}
+              iconColor={isMuted ? '#EF4444' : '#fff'}
+              size={28}
+              onPress={toggleMute}
+              style={[styles.iconButton, isMuted && styles.iconButtonActive]}
+            />
+            <Text style={styles.actionLabel}>{isMuted ? 'Unmute' : 'Mute'}</Text>
+          </View>
 
-        <View style={styles.actionButton}>
-          <IconButton
-            icon={isSpeakerOn ? 'volume-high' : 'volume-off'}
-            iconColor={isSpeakerOn ? theme.colors.primary : '#fff'}
-            size={28}
-            onPress={toggleSpeaker}
-            style={[styles.iconButton, isSpeakerOn && styles.iconButtonActive]}
-          />
-          <Text style={styles.actionLabel}>{isSpeakerOn ? 'Speaker On' : 'Speaker'}</Text>
+          <View style={styles.actionButton}>
+            <IconButton
+              icon={isSpeakerOn ? 'volume-high' : 'volume-off'}
+              iconColor={isSpeakerOn ? theme.colors.primary : '#fff'}
+              size={28}
+              onPress={toggleSpeaker}
+              style={[styles.iconButton, isSpeakerOn && styles.iconButtonActive]}
+            />
+            <Text style={styles.actionLabel}>{isSpeakerOn ? 'Speaker On' : 'Speaker'}</Text>
+          </View>
         </View>
-      </View>
+      )}
 
       <View style={styles.hangupContainer}>
-        <IconButton
-          icon="phone-hangup"
-          iconColor="#fff"
-          size={36}
-          onPress={endCall}
-          style={styles.hangupButton}
-        />
-        <Text style={styles.hangupLabel}>End Call</Text>
+        {isTerminal ? (
+          <>
+            <IconButton
+              icon="close"
+              iconColor="#fff"
+              size={36}
+              onPress={resetCallState}
+              style={styles.closeButton}
+            />
+            <Text style={styles.closeLabel}>Close</Text>
+          </>
+        ) : (
+          <>
+            <IconButton
+              icon="phone-hangup"
+              iconColor="#fff"
+              size={36}
+              onPress={endCall}
+              style={styles.hangupButton}
+            />
+            <Text style={styles.hangupLabel}>
+              {status === 'calling' ? 'Cancel' : 'End Call'}
+            </Text>
+          </>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -103,6 +137,9 @@ const styles = StyleSheet.create({
   callStatus: {
     fontSize: 16,
     color: '#9CA3AF',
+  },
+  callStatusError: {
+    color: '#EF4444',
   },
   avatarContainer: {
     alignItems: 'center',
@@ -154,6 +191,17 @@ const styles = StyleSheet.create({
   },
   hangupLabel: {
     color: '#EF4444',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  closeButton: {
+    backgroundColor: '#4B5563',
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+  },
+  closeLabel: {
+    color: '#9CA3AF',
     fontSize: 12,
     marginTop: 4,
   },

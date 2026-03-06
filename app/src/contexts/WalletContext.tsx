@@ -9,6 +9,7 @@ export interface WalletContextType {
   connected: boolean;
   connecting: boolean;
   isRestoring: boolean;
+  encryptionSignature: Uint8Array | null;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
   signMessage: (message: Uint8Array) => Promise<Uint8Array>;
@@ -38,6 +39,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [connecting, setConnecting] = useState(false);
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
+  const [encryptionSignature, setEncryptionSignature] = useState<Uint8Array | null>(null);
 
   // Helper to reestablish wallet connection using stored session
   const reestablishConnection = useCallback(async (token: string, pubkey: PublicKey, encryptionSig: Uint8Array): Promise<boolean> => {
@@ -57,6 +59,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setAuthToken(token);
       setPublicKey(pubkey);
       setConnected(true);
+      setEncryptionSignature(encryptionSig);
       (window as any).__mukonEncryptionSignature = encryptionSig;
 
       console.log('✅ Wallet session reestablished!');
@@ -172,6 +175,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         }
 
         // Store signature in memory
+        setEncryptionSignature(encryptionSig);
         (window as any).__mukonEncryptionSignature = encryptionSig;
 
         // Set state
@@ -202,6 +206,8 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setPublicKey(null);
       setConnected(false);
       setAuthToken(null);
+      setEncryptionSignature(null);
+      (window as any).__mukonEncryptionSignature = null;
 
       // Clear AsyncStorage
       await AsyncStorage.multiRemove(['@mukon_auth_token', '@mukon_pubkey', '@mukon_encryption_sig']);
@@ -316,6 +322,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     connected,
     connecting,
     isRestoring,
+    encryptionSignature,
     connect,
     disconnect,
     signMessage,
