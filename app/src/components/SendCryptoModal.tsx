@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
