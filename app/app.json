@@ -23,7 +23,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "../assets/ICON.png",
-        "backgroundColor": "#0D0D0D"
+        "backgroundColor": "#7C3AED"
       },
       "package": "com.mukon.messenger",
       "usesCleartextTraffic": true,

@@ -358,10 +358,15 @@ export function CallProvider({ children }: { children: ReactNode }) {
       setState(prev => ({ ...prev, status: 'ended' }));
     };
 
-    // Target busy or offline
+    // Target busy — only act if actually busy (in another call), not offline
+    // If offline, let the 30s ring timeout handle it naturally
     const handleBusy = ({ callId, reason }: any) => {
       if (callId !== callIdRef.current) return;
-      console.log('📞 Call target busy/offline:', reason);
+      if (reason === 'offline') {
+        console.log('📞 Target offline — ringing until timeout');
+        return;
+      }
+      console.log('📞 Target busy:', reason);
       if (ringTimeoutRef.current) {
         clearTimeout(ringTimeoutRef.current);
         ringTimeoutRef.current = null;

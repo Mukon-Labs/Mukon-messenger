@@ -1,8 +1,8 @@
 # Mukon Messenger
 
-**Privacy-first, wallet-to-wallet encrypted messenger for Solana**
+**Privacy-first, wallet-to-wallet encrypted messenger for Solana Mobile**
 
-Built for the Solana Privacy Hackathon (Jan 12-30, 2026)
+Built for the Solana Mobile Monolith Hackathon 2026
 
 ---
 
@@ -12,7 +12,9 @@ Built for the Solana Privacy Hackathon (Jan 12-30, 2026)
 
 **Backend:** https://backend-rough-bird-7310.fly.dev
 
-**Status:** ✅ Fully functional MVP with E2E encryption, group chats, and on-chain key backup
+**APK Download:** [Google Drive link] *(see Submission section)*
+
+**Status:** ✅ Fully functional MVP — E2E encrypted DMs, group chats, voice calls, on-chain key backup
 
 ---
 
@@ -20,15 +22,17 @@ Built for the Solana Privacy Hackathon (Jan 12-30, 2026)
 
 Mukon Messenger is a **truly private messaging app** where your wallet is your identity. No phone numbers, no email addresses, no centralized servers storing your data.
 
-**Key Privacy Features:**
+**Key Features:**
 - **End-to-end encrypted DMs** (NaCl box asymmetric encryption)
 - **Encrypted group chats** (NaCl secretbox with on-chain key backup)
-- **On-chain encrypted key recovery** - Unique feature! Your group keys are backed up encrypted on-chain, so clearing app data doesn't lock you out
-- **ZK Compression integration** - Light Protocol integration for reduced storage costs (foundation implemented)
-- **1-click session keys** - Sign once at login, all on-chain operations are automatic (no wallet popups)
+- **Voice calls** (WebRTC audio through Socket.IO signaling)
+- **On-chain encrypted key recovery** — Your group keys are backed up encrypted on-chain, so clearing app data doesn't lock you out (WhatsApp/Signal can't do this)
+- **1-click session keys** — Sign once at login, all on-chain operations are automatic (no wallet popups)
+- **Token-gated groups** — Require SPL token balance to join
 - **Contact lists encrypted with Arcium MPC v0.8.0** (3 circuits live on devnet)
-- **Social graph privacy** - No one can see who you're talking to
-- **Wallet-based identity** - Your Solana wallet is your account
+- **Local-first architecture** — Messages stored on device, works offline, backend is temporary relay
+- **QR code contact sharing** — Share wallet address as QR, scan to add contacts
+- **Wallet-based identity** — Your Solana wallet is your account, no phone number needed
 
 **Why It Matters:**
 
@@ -110,6 +114,7 @@ adb install mukon-debug.apk
 - **Local-first Storage** - Messages persist on device (AsyncStorage), works offline
 - **Push Notifications** - Local notifications via expo-notifications
 - **QR Code Sharing** - Share wallet address as QR, scan to add contacts
+- **Voice Calls** - WebRTC audio calls with Socket.IO signaling (call, ring, answer, decline)
 - **Message Deletion** - Delete for self or delete for everyone (sender only)
 
 ### 👥 Group Chats
@@ -238,6 +243,10 @@ request_group_key     // Request group key if offline
 mark_messages_read    // Update read receipt
 delete_message        // Delete message for everyone
 invitation_rejected   // Notify peer of rejection
+call_offer            // Initiate WebRTC voice call
+call_answer           // Accept incoming call
+call_ice_candidate    // ICE candidate for WebRTC
+call_end / call_decline / call_busy  // Call lifecycle
 
 // Server → Client
 new_message           // Receive DM
@@ -246,6 +255,7 @@ group_key_shared      // Receive group key
 messages_read         // Peer read your messages
 message_deleted       // Message deleted by sender
 invitation_rejected   // Your invitation was rejected
+call_offer / call_answer / call_ice_candidate  // Call signaling relay
 ```
 
 ### Layer 3: Client (React Native)
@@ -376,6 +386,7 @@ Light Protocol enables compressed accounts on Solana — state stored as hashes 
 - React Native + Expo 51
 - Solana Mobile Wallet Adapter
 - TweetNaCl (E2E encryption)
+- react-native-webrtc (voice calls)
 - React Navigation
 - React Native Paper (UI)
 - AsyncStorage (local-first message storage)
@@ -504,6 +515,18 @@ arcium deploy --skip-init --cluster-offset 456 --recovery-set-size 4 \
 
 ---
 
-Built for the **Solana Privacy Hackathon 2026** | Solana + Arcium + Light Protocol + NaCl
+## Solana Mobile Stack Integration
 
-**Your data, your keys, your sovereignty.**
+Mukon is built mobile-first using the Solana Mobile Stack:
+
+- **Mobile Wallet Adapter (MWA)** — Connect Phantom/Solflare for auth + transaction signing
+- **On-chain program (Anchor)** — User profiles, relationships, groups, session tokens all on Solana
+- **Helius RPC** — Reliable devnet access via Helius free tier
+- **React Native + Expo** — Native Android app with Solana Mobile Wallet Adapter
+- **Session Keys** — One wallet popup at login, then all transactions auto-signed (no UX friction)
+
+---
+
+Built for the **Solana Mobile Monolith Hackathon 2026** | Solana Mobile + Arcium + NaCl + WebRTC
+
+**Your wallet is your identity. Your data, your keys, your sovereignty.**

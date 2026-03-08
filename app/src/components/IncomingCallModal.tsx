@@ -3,7 +3,7 @@ import { View, StyleSheet, Modal, Animated } from 'react-native';
 import { Text, Button } from 'react-native-paper';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useCall, Contact } from '../contexts/CallContext';
-import Avatar from './Avatar';
+import AvatarDisplay from './AvatarDisplay';
 
 interface IncomingCallModalProps {
   visible: boolean;
@@ -32,7 +32,7 @@ export default function IncomingCallModal({ visible, caller, onAccept, onDecline
       <View style={styles.container}>
         <View style={styles.content}>
           <Animated.View style={[styles.avatarContainer, { transform: [{ scale: ringAnim }] }]}>
-            <Avatar name={caller.name} size="xlarge" showBorder />
+            <AvatarDisplay avatar={caller.avatar} size={180} name={caller.name} />
           </Animated.View>
 
           <Text style={styles.callerName}>{caller.name}</Text>

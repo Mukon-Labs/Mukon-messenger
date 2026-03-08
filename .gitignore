@@ -22,12 +22,14 @@ npm-debug.*
 *.orig.*
 web-build/
 
-# IDEs
+# IDEs & dev tools
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+CLAUDE.md
+.dev/
 
 # OS
 .DS_Store

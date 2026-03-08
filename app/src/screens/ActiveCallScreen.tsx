@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, SafeAreaView } from 'react-native';
 import { Text, IconButton, useTheme } from 'react-native-paper';
 import { useCall } from '../contexts/CallContext';
-import Avatar from '../components/Avatar';
+import AvatarDisplay from '../components/AvatarDisplay';
 
 interface ActiveCallScreenProps {
   visible: boolean;
@@ -10,8 +10,8 @@ interface ActiveCallScreenProps {
 
 const STATUS_TEXT: Record<string, string> = {
   calling: 'Calling...',
-  unavailable: 'Unavailable',
-  declined: 'Call Declined',
+  unavailable: 'No Answer',
+  declined: 'No Answer',
   ended: 'Call Ended',
 };
 
@@ -19,25 +19,29 @@ export default function ActiveCallScreen({ visible }: ActiveCallScreenProps) {
   const theme = useTheme();
   const { status, partner, startTime, isMuted, isSpeakerOn, toggleMute, toggleSpeaker, endCall, resetCallState } = useCall();
   const [callDuration, setCallDuration] = useState('00:00');
+  const [callingStartTime] = useState(Date.now());
 
   const isTerminal = status === 'unavailable' || status === 'declined' || status === 'ended';
   const isActive = status === 'active';
+  const isCalling = status === 'calling';
 
   useEffect(() => {
-    if (!startTime) {
-      setCallDuration(STATUS_TEXT[status] || '00:00');
+    if (isTerminal) {
+      setCallDuration(STATUS_TEXT[status] || '');
       return;
     }
 
+    // Count up timer for both "calling" (ringing) and "active" (connected)
+    const refTime = startTime || callingStartTime;
     const interval = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const elapsed = Math.floor((Date.now() - refTime) / 1000);
       const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
       const seconds = (elapsed % 60).toString().padStart(2, '0');
       setCallDuration(`${minutes}:${seconds}`);
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [startTime, status]);
+  }, [startTime, status, callingStartTime]);
 
   if (!visible || !partner) return null;
 
@@ -45,16 +49,15 @@ export default function ActiveCallScreen({ visible }: ActiveCallScreenProps) {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.partnerName}>{partner.name}</Text>
-        <Text style={[
-          styles.callStatus,
-          isTerminal && styles.callStatusError,
-        ]}>
-          {callDuration}
-        </Text>
+        {isCalling && <Text style={styles.callingLabel}>Calling...</Text>}
+        {isTerminal && (
+          <Text style={styles.callStatusError}>{STATUS_TEXT[status]}</Text>
+        )}
+        <Text style={styles.callStatus}>{callDuration}</Text>
       </View>
 
       <View style={styles.avatarContainer}>
-        <Avatar name={partner.name} size="xlarge" />
+        <AvatarDisplay avatar={partner.avatar} size={180} name={partner.name} />
       </View>
 
       <View style={styles.infoContainer}>
@@ -134,12 +137,19 @@ const styles = StyleSheet.create({
     color: '#fff',
     marginBottom: 8,
   },
+  callingLabel: {
+    fontSize: 16,
+    color: '#9CA3AF',
+    marginBottom: 4,
+  },
   callStatus: {
     fontSize: 16,
     color: '#9CA3AF',
   },
   callStatusError: {
+    fontSize: 16,
     color: '#EF4444',
+    marginBottom: 4,
   },
   avatarContainer: {
     alignItems: 'center',

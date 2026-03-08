@@ -262,6 +262,7 @@ export default function ChatScreen({ route, navigation }: any) {
             onPress={() => startCall({
               id: contact.pubkey,
               name: displayName,
+              avatar: contact.avatar,
               walletAddress: contact.pubkey,
             })}
           />
