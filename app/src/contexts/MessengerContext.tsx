@@ -2222,13 +2222,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
   // Load profile and contacts when encryption keys are available
   useEffect(() => {
-    if (wallet?.publicKey && encryptionKeys) {
+    if (wallet?.publicKey && encryptionReady) {
       loadProfile();
       loadContacts();
       loadGroups();
       loadGroupInvites();
     }
-  }, [wallet?.publicKey, encryptionKeys]);
+  }, [wallet?.publicKey, encryptionReady]);
 
   // Fix 5b: Fetch group avatars AFTER groups load AND socket connects
   useEffect(() => {
