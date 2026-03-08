@@ -21,6 +21,7 @@
       "bundleIdentifier": "com.mukon.messenger"
     },
     "android": {
+      "minSdkVersion": 24,
       "adaptiveIcon": {
         "foregroundImage": "../assets/ICON.png",
         "backgroundColor": "#7C3AED"
