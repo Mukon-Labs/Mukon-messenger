@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js';
 import { transact } from '@solana-mobile/mobile-wallet-adapter-protocol-web3js';
 import { toUint8Array } from 'js-base64';
@@ -40,6 +40,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
   const [encryptionSignature, setEncryptionSignature] = useState<Uint8Array | null>(null);
+  const connectedRef = useRef(false);
 
   // Helper to reestablish wallet connection using stored session
   const reestablishConnection = useCallback(async (token: string, pubkey: PublicKey, encryptionSig: Uint8Array): Promise<boolean> => {
@@ -59,6 +60,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setAuthToken(token);
       setPublicKey(pubkey);
       setConnected(true);
+      connectedRef.current = true;
       setEncryptionSignature(encryptionSig);
       (window as any).__mukonEncryptionSignature = encryptionSig;
 
@@ -106,6 +108,10 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [reestablishConnection]);
 
   const connect = useCallback(async () => {
+    if (connectedRef.current) {
+      console.log('⏭️ Already connected, skipping connect()');
+      return;
+    }
     setConnecting(true);
     try {
       const encryptionSignature = await transact(async (wallet) => {
@@ -181,6 +187,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         // Set state
         setPublicKey(pubkey);
         setConnected(true);
+        connectedRef.current = true;
         console.log('Wallet connected:', pubkey.toBase58());
 
         return encryptionSig;
@@ -205,6 +212,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     } finally {
       setPublicKey(null);
       setConnected(false);
+      connectedRef.current = false;
       setAuthToken(null);
       setEncryptionSignature(null);
       (window as any).__mukonEncryptionSignature = null;

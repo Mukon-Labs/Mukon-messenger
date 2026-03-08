@@ -73,6 +73,11 @@ function DrawerNavigatorScreens() {
 function AppNavigator() {
   const wallet = useWallet();
 
+  // Show nothing while restoring session (prevents flash of connect screen)
+  if (wallet.isRestoring) {
+    return null;
+  }
+
   if (!wallet.connected) {
     return <WalletConnectScreen />;
   }

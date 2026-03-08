@@ -525,36 +525,13 @@ export default function ChatScreen({ route, navigation }: any) {
               leadingIcon="pin"
             />
             <Menu.Item
-              onPress={() => {
-                setMenuVisible(null);
-                setQuickReactVisible(null);
-                setDeleteMenuVisible(item.id);
-              }}
-              title="Delete"
-              leadingIcon="delete"
-            />
-          </Menu>
-
-          {/* Delete Submenu */}
-          <Menu
-            visible={deleteMenuVisible === item.id}
-            onDismiss={() => setDeleteMenuVisible(null)}
-            anchor={<View />}
-          >
-            <Menu.Item
-              onPress={() => {
-                handleDeleteMessage(item.id, false);
-                setDeleteMenuVisible(null);
-              }}
+              onPress={() => handleDeleteMessage(item.id, false)}
               title="Delete for Me"
               leadingIcon="delete-outline"
             />
             {item.isMe && (
               <Menu.Item
-                onPress={() => {
-                  handleDeleteMessage(item.id, true);
-                  setDeleteMenuVisible(null);
-                }}
+                onPress={() => handleDeleteMessage(item.id, true)}
                 title="Delete for Everyone"
                 leadingIcon="delete-forever"
               />
