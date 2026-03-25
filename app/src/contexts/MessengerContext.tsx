@@ -126,6 +126,7 @@ interface MessengerContextType {
   unreadCounts: Map<string, number>;
   readTimestamps: Map<string, number>;
   loading: boolean;
+  profileChecked: boolean;
   encryptionReady: boolean;
   // DM methods
   register: (displayName: string, avatarData?: string) => Promise<string | null>;
@@ -198,6 +199,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   const [encryptionKeys, setEncryptionKeys] = useState<nacl.BoxKeyPair | null>(null);
   const [encryptionReady, setEncryptionReady] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [profileChecked, setProfileChecked] = useState(false); // true after initial cache check
   const derivingKeys = useRef(false);
   // Group state
   const [groups, setGroups] = useState<Group[]>([]);
@@ -370,6 +372,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   // Load cached profile immediately on mount to prevent showing register screen (Fix: wallet persistence)
   useEffect(() => {
     if (!wallet?.publicKey) return;
+    setProfileChecked(false); // Reset on wallet change
 
     const loadCachedProfile = async () => {
       try {
@@ -386,6 +389,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         }
       } catch (error) {
         console.warn('Failed to load cached profile:', error);
+      } finally {
+        setProfileChecked(true);
       }
     };
 
@@ -3348,6 +3353,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     unreadCounts,
     readTimestamps,
     loading,
+    profileChecked,
     encryptionReady,
     register,
     updateProfile,
