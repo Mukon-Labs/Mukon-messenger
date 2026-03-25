@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { View, StyleSheet, Modal, ScrollView } from 'react-native';
+import { View, StyleSheet, Modal, ScrollView, ActivityIndicator } from 'react-native';
 import { Text, IconButton, Divider, Button, TextInput } from 'react-native-paper';
 import * as Clipboard from 'expo-clipboard';
 import { theme } from '../theme';
 import SendCryptoModal from './SendCryptoModal';
 import AvatarDisplay from './AvatarDisplay';
+import { useMessenger } from '../contexts/MessengerContext';
 
 interface GroupInCommon {
   name: string;
@@ -45,9 +46,12 @@ export default function ContactProfileModal({
   onDeleteContact,
   onBlockContact,
 }: ContactProfileModalProps) {
+  const messenger = useMessenger();
   const [editingName, setEditingName] = useState(false);
   const [tempName, setTempName] = useState(displayName);
   const [sendCryptoVisible, setSendCryptoVisible] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<boolean | null | undefined>(undefined);
 
   const handleCopyAddress = async () => {
     await Clipboard.setStringAsync(walletAddress);
@@ -191,6 +195,30 @@ export default function ContactProfileModal({
             recipientPubkey={walletAddress}
             recipientName={displayName}
           />
+
+          {/* Arcium MPC Verification */}
+          {isContact && (
+            <Button
+              mode="outlined"
+              onPress={async () => {
+                setVerifying(true);
+                setVerifyResult(undefined);
+                const result = await messenger.verifyContactPrivately(walletAddress);
+                setVerifyResult(result);
+                setVerifying(false);
+              }}
+              disabled={verifying}
+              style={styles.actionButton}
+              contentStyle={styles.actionButtonContent}
+              icon={verifyResult === true ? 'shield-check' : verifyResult === false ? 'shield-alert' : 'shield-lock'}
+            >
+              {verifying ? 'Verifying via MPC...' :
+               verifyResult === true ? 'Verified (Arcium MPC)' :
+               verifyResult === false ? 'Not Mutual' :
+               verifyResult === null ? 'Verification Failed' :
+               'Verify Contact (Arcium MPC)'}
+            </Button>
+          )}
 
           <Divider style={styles.divider} />
 

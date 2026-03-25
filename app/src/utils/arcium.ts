@@ -155,6 +155,16 @@ export function decryptResult(
 }
 
 /**
+ * Generate ephemeral x25519 keypair and nonce for an MPC computation
+ */
+export function generateEphemeralKeys(): { publicKey: Uint8Array; privateKey: Uint8Array; nonce: Uint8Array } {
+  const privateKey = x25519.utils.randomSecretKey();
+  const publicKey = x25519.getPublicKey(privateKey);
+  const nonce = randomBytes(16);
+  return { publicKey, privateKey, nonce };
+}
+
+/**
  * Get computation definition account address for a circuit
  */
 export function getCompDefAddress(circuitName: string): PublicKey {
