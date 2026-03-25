@@ -73,8 +73,8 @@ export default function ContactsScreen({ navigation }: any) {
     }
   };
 
-  // Show registration screen if not registered
-  if (messenger.profile === null && !messenger.loading && wallet.connected) {
+  // Show registration screen if not registered (wait for cache check to avoid flash)
+  if (messenger.profile === null && !messenger.loading && messenger.profileChecked && wallet.connected) {
     return (
       <View style={styles.registrationContainer}>
         <Avatar.Icon

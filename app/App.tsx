@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { NavigationContainer, DarkTheme } from '@react-navigation/native';
+import React, { useEffect, useRef } from 'react';
+import { NavigationContainer, DarkTheme, NavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createDrawerNavigator } from '@react-navigation/drawer';
 import { Provider as PaperProvider } from 'react-native-paper';
@@ -72,6 +72,57 @@ function DrawerNavigatorScreens() {
 
 function AppNavigator() {
   const wallet = useWallet();
+  const navigationRef = useRef<NavigationContainerRef<any>>(null);
+
+  // Navigate to conversation from notification data
+  const navigateToNotification = (data: any) => {
+    const nav = navigationRef.current;
+    if (!nav) return;
+
+    if (data.type === 'group' && data.groupId) {
+      nav.navigate('GroupChat' as never, { groupId: data.groupId, groupName: data.senderName || 'Group' } as never);
+    } else if (data.type === 'dm' && data.senderPubkey) {
+      nav.navigate('Chat' as never, {
+        contact: {
+          pubkey: data.senderPubkey,
+          displayName: data.senderName || `${data.senderPubkey?.slice(0, 8)}...`,
+        },
+      } as never);
+    }
+  };
+
+  // Cold start: check for pending notification saved before app was ready
+  useEffect(() => {
+    if (!wallet.connected) return;
+
+    const checkPendingNotification = async () => {
+      try {
+        const pending = await AsyncStorage.getItem('pendingNotification');
+        if (!pending) return;
+        await AsyncStorage.removeItem('pendingNotification');
+        // Delay to let navigation mount
+        setTimeout(() => navigateToNotification(JSON.parse(pending)), 500);
+      } catch (error) {
+        console.error('Failed to handle pending notification:', error);
+      }
+    };
+
+    checkPendingNotification();
+  }, [wallet.connected]);
+
+  // Warm start: listen for notification taps while app is running
+  useEffect(() => {
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data;
+      if (data && navigationRef.current) {
+        // Clear any saved pending notification since we're handling it now
+        AsyncStorage.removeItem('pendingNotification').catch(() => {});
+        navigateToNotification(data);
+      }
+    });
+
+    return () => subscription.remove();
+  }, []);
 
   // Show nothing while restoring session (prevents flash of connect screen)
   if (wallet.isRestoring) {
@@ -86,7 +137,7 @@ function AppNavigator() {
     <MessengerProvider wallet={wallet} cluster="devnet">
       <CallProvider>
         <CallUIOverlay />
-        <NavigationContainer theme={navTheme}>
+        <NavigationContainer ref={navigationRef} theme={navTheme}>
           <StatusBar style="light" />
           <Stack.Navigator
             screenOptions={{
@@ -167,32 +218,6 @@ function AppNavigator() {
 }
 
 export default function App() {
-  // Set up notification handling
-  useEffect(() => {
-    Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowAlert: true,
-        shouldPlaySound: true,
-        shouldSetBadge: true,
-        shouldShowBanner: true,
-        shouldShowList: true,
-      }),
-    });
-
-    // Listen for notification responses (when user taps a notification)
-    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification.request.content.data;
-      console.log('📬 Notification tapped:', data);
-      if (data) {
-        AsyncStorage.setItem('pendingNotification', JSON.stringify(data)).catch(console.error);
-      }
-    });
-
-    return () => {
-      subscription.remove();
-    };
-  }, []);
-
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <WalletProvider>
