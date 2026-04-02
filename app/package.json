@@ -33,6 +33,7 @@
     "assert": "^2.1.0",
     "bs58": "^5.0.0",
     "buffer": "^6.0.3",
+    "crypto-browserify": "^3.12.1",
     "expo": "~51.0.0",
     "expo-camera": "~15.0.16",
     "expo-clipboard": "~6.0.3",
@@ -54,6 +55,7 @@
     "react-native-worklets-core": "^1.6.2",
     "readable-stream": "^4.7.0",
     "socket.io-client": "^4.7.0",
+    "stream-browserify": "^3.0.0",
     "text-encoding-polyfill": "^0.6.7",
     "tweetnacl": "^1.0.3"
   },
