@@ -2156,7 +2156,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       console.log('✅ Got MXE public key');
 
       // 2. Generate ephemeral x25519 keypair + nonce for this computation
-      const { publicKey: ephPublicKey, privateKey: ephPrivateKey, nonce } = generateEphemeralKeys();
+      const { publicKey: ephPublicKey, privateKey: ephPrivateKey, nonce } = await generateEphemeralKeys();
 
       // 4. Find the Relationship PDA for this contact pair
       const contactPubkey = new PublicKey(queryPubkey);
@@ -2175,7 +2175,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       // 6. Build and send check_mutual_contact transaction
       console.log('📤 Queueing MPC check_mutual_contact computation...');
       const session = sessionInfoRef.current || undefined;
-      const instruction = createCheckMutualContactInstruction(
+      const instruction = await createCheckMutualContactInstruction(
         wallet.publicKey,
         computationOffset,
         relationshipPDA,

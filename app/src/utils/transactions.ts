@@ -1874,11 +1874,11 @@ const ARCIUM_CLOCK = new PublicKey('ARC3JqAVRc8jj1tNe4u1oGbf4VPMHYxj5VhvNhGSC3D6
 /**
  * Build init_is_mutual_contact_comp_def instruction
  */
-export function createInitIsMutualContactCompDefInstruction(
+export async function createInitIsMutualContactCompDefInstruction(
   payer: PublicKey
-): TransactionInstruction {
-  const mxeAccount = getMXEAddress();
-  const compDefAccount = getCompDefAddress('is_mutual_contact');
+): Promise<TransactionInstruction> {
+  const mxeAccount = await getMXEAddress();
+  const compDefAccount = await getCompDefAddress('is_mutual_contact');
 
   const data = DISCRIMINATORS.init_is_mutual_contact_comp_def;
 
@@ -1898,11 +1898,11 @@ export function createInitIsMutualContactCompDefInstruction(
 /**
  * Build init_count_accepted_comp_def instruction
  */
-export function createInitCountAcceptedCompDefInstruction(
+export async function createInitCountAcceptedCompDefInstruction(
   payer: PublicKey
-): TransactionInstruction {
-  const mxeAccount = getMXEAddress();
-  const compDefAccount = getCompDefAddress('count_accepted');
+): Promise<TransactionInstruction> {
+  const mxeAccount = await getMXEAddress();
+  const compDefAccount = await getCompDefAddress('count_accepted');
 
   const data = DISCRIMINATORS.init_count_accepted_comp_def;
 
@@ -1922,11 +1922,11 @@ export function createInitCountAcceptedCompDefInstruction(
 /**
  * Build init_add_two_numbers_comp_def instruction
  */
-export function createInitAddTwoNumbersCompDefInstruction(
+export async function createInitAddTwoNumbersCompDefInstruction(
   payer: PublicKey
-): TransactionInstruction {
-  const mxeAccount = getMXEAddress();
-  const compDefAccount = getCompDefAddress('add_two_numbers');
+): Promise<TransactionInstruction> {
+  const mxeAccount = await getMXEAddress();
+  const compDefAccount = await getCompDefAddress('add_two_numbers');
 
   const data = DISCRIMINATORS.init_add_two_numbers_comp_def;
 
@@ -1963,7 +1963,7 @@ const INSTRUCTIONS_SYSVAR = new PublicKey('Sysvar1nstructions1111111111111111111
  *       relationship_offset (u32), relationship_length (u32),
  *       pub_key ([u8; 32] x25519 ephemeral), nonce (u128)
  */
-export function createCheckMutualContactInstruction(
+export async function createCheckMutualContactInstruction(
   payer: PublicKey,
   computationOffset: number,
   relationshipAccount: PublicKey,
@@ -1972,7 +1972,7 @@ export function createCheckMutualContactInstruction(
   x25519PubKey: Uint8Array,
   nonce: Uint8Array,
   session?: SessionInfo,
-): TransactionInstruction {
+): Promise<TransactionInstruction> {
   const signerPubkey = session ? session.sessionPubkey : payer;
 
   const data = Buffer.alloc(8 + 8 + 32 + 4 + 4 + 32 + 16);
@@ -1988,12 +1988,12 @@ export function createCheckMutualContactInstruction(
   const keys = [
     { pubkey: signerPubkey, isSigner: true, isWritable: true },
     { pubkey: getSignPDA(), isSigner: false, isWritable: true },
-    { pubkey: getMXEAddress(), isSigner: false, isWritable: false },
-    { pubkey: getMempoolAddress(), isSigner: false, isWritable: true },
-    { pubkey: getExecutingPoolAddress(), isSigner: false, isWritable: true },
-    { pubkey: getComputationAddress(computationOffset), isSigner: false, isWritable: true },
-    { pubkey: getCompDefAddress('is_mutual_contact'), isSigner: false, isWritable: false },
-    { pubkey: getClusterAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getMXEAddress(), isSigner: false, isWritable: false },
+    { pubkey: await getMempoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getExecutingPoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getComputationAddress(computationOffset), isSigner: false, isWritable: true },
+    { pubkey: await getCompDefAddress('is_mutual_contact'), isSigner: false, isWritable: false },
+    { pubkey: await getClusterAddress(), isSigner: false, isWritable: true },
     { pubkey: ARCIUM_FEE_POOL, isSigner: false, isWritable: true },
     { pubkey: ARCIUM_CLOCK, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -2010,7 +2010,7 @@ export function createCheckMutualContactInstruction(
 /**
  * Build count_accepted_contacts instruction — queues MPC to count accepted contacts privately
  */
-export function createCountAcceptedContactsInstruction(
+export async function createCountAcceptedContactsInstruction(
   payer: PublicKey,
   computationOffset: number,
   contactListAccount: PublicKey,
@@ -2019,7 +2019,7 @@ export function createCountAcceptedContactsInstruction(
   x25519PubKey: Uint8Array,
   nonce: Uint8Array,
   session?: SessionInfo,
-): TransactionInstruction {
+): Promise<TransactionInstruction> {
   const signerPubkey = session ? session.sessionPubkey : payer;
 
   const data = Buffer.alloc(8 + 8 + 32 + 4 + 4 + 32 + 16);
@@ -2035,12 +2035,12 @@ export function createCountAcceptedContactsInstruction(
   const keys = [
     { pubkey: signerPubkey, isSigner: true, isWritable: true },
     { pubkey: getSignPDA(), isSigner: false, isWritable: true },
-    { pubkey: getMXEAddress(), isSigner: false, isWritable: false },
-    { pubkey: getMempoolAddress(), isSigner: false, isWritable: true },
-    { pubkey: getExecutingPoolAddress(), isSigner: false, isWritable: true },
-    { pubkey: getComputationAddress(computationOffset), isSigner: false, isWritable: true },
-    { pubkey: getCompDefAddress('count_accepted'), isSigner: false, isWritable: false },
-    { pubkey: getClusterAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getMXEAddress(), isSigner: false, isWritable: false },
+    { pubkey: await getMempoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getExecutingPoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getComputationAddress(computationOffset), isSigner: false, isWritable: true },
+    { pubkey: await getCompDefAddress('count_accepted'), isSigner: false, isWritable: false },
+    { pubkey: await getClusterAddress(), isSigner: false, isWritable: true },
     { pubkey: ARCIUM_FEE_POOL, isSigner: false, isWritable: true },
     { pubkey: ARCIUM_CLOCK, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
