@@ -18,7 +18,7 @@
     "dev": "concurrently \"npm run android:dev\" \"npm run start --dev-client\""
   },
   "dependencies": {
-    "@arcium-hq/client": "^0.6.3",
+    "@arcium-hq/client": "^0.8.0",
     "@coral-xyz/anchor": "^0.32.1",
     "@craftzdog/react-native-buffer": "^6.1.1",
     "@lightprotocol/stateless.js": "^0.23.0-beta.5",

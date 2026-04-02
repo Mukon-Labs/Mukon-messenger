@@ -1847,12 +1847,6 @@ export async function createRejectGroupInviteCompressedInstruction(
 
 // ========== ARCIUM MPC INSTRUCTIONS ==========
 
-/**
- * Import Arcium utilities
- * Note: These are used by the Arcium instruction builders below
- * ARCIUM TEMPORARILY DISABLED - Re-enable after core demo
- */
-/*
 import {
   getMXEAddress,
   getCompDefAddress,
@@ -1861,7 +1855,6 @@ import {
   getExecutingPoolAddress,
   getComputationAddress,
 } from './arcium';
-*/
 
 /**
  * Get Arcium program ID
@@ -1959,5 +1952,105 @@ function getSignPDA(): PublicKey {
     PROGRAM_ID
   );
   return pda;
+}
+
+const INSTRUCTIONS_SYSVAR = new PublicKey('Sysvar1nstructions1111111111111111111111111');
+
+/**
+ * Build check_mutual_contact instruction — queues MPC to verify relationship is mutual
+ *
+ * Args: computation_offset (u64), relationship_account (Pubkey),
+ *       relationship_offset (u32), relationship_length (u32),
+ *       pub_key ([u8; 32] x25519 ephemeral), nonce (u128)
+ */
+export function createCheckMutualContactInstruction(
+  payer: PublicKey,
+  computationOffset: number,
+  relationshipAccount: PublicKey,
+  relationshipOffset: number,
+  relationshipLength: number,
+  x25519PubKey: Uint8Array,
+  nonce: Uint8Array,
+  session?: SessionInfo,
+): TransactionInstruction {
+  const signerPubkey = session ? session.sessionPubkey : payer;
+
+  const data = Buffer.alloc(8 + 8 + 32 + 4 + 4 + 32 + 16);
+  let offset = 0;
+  DISCRIMINATORS.check_mutual_contact.copy(data, offset); offset += 8;
+  data.writeBigUInt64LE(BigInt(computationOffset), offset); offset += 8;
+  Buffer.from(relationshipAccount.toBytes()).copy(data, offset); offset += 32;
+  data.writeUInt32LE(relationshipOffset, offset); offset += 4;
+  data.writeUInt32LE(relationshipLength, offset); offset += 4;
+  Buffer.from(x25519PubKey).copy(data, offset); offset += 32;
+  Buffer.from(nonce).copy(data, offset); // 16 bytes for u128
+
+  const keys = [
+    { pubkey: signerPubkey, isSigner: true, isWritable: true },
+    { pubkey: getSignPDA(), isSigner: false, isWritable: true },
+    { pubkey: getMXEAddress(), isSigner: false, isWritable: false },
+    { pubkey: getMempoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: getExecutingPoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: getComputationAddress(computationOffset), isSigner: false, isWritable: true },
+    { pubkey: getCompDefAddress('is_mutual_contact'), isSigner: false, isWritable: false },
+    { pubkey: getClusterAddress(), isSigner: false, isWritable: true },
+    { pubkey: ARCIUM_FEE_POOL, isSigner: false, isWritable: true },
+    { pubkey: ARCIUM_CLOCK, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: ARCIUM_PROGRAM_ID, isSigner: false, isWritable: false },
+  ];
+
+  if (session) {
+    keys.push({ pubkey: session.sessionTokenPDA, isSigner: false, isWritable: false });
+  }
+
+  return new TransactionInstruction({ keys, programId: PROGRAM_ID, data });
+}
+
+/**
+ * Build count_accepted_contacts instruction — queues MPC to count accepted contacts privately
+ */
+export function createCountAcceptedContactsInstruction(
+  payer: PublicKey,
+  computationOffset: number,
+  contactListAccount: PublicKey,
+  contactListOffset: number,
+  contactListLength: number,
+  x25519PubKey: Uint8Array,
+  nonce: Uint8Array,
+  session?: SessionInfo,
+): TransactionInstruction {
+  const signerPubkey = session ? session.sessionPubkey : payer;
+
+  const data = Buffer.alloc(8 + 8 + 32 + 4 + 4 + 32 + 16);
+  let offset = 0;
+  DISCRIMINATORS.count_accepted_contacts.copy(data, offset); offset += 8;
+  data.writeBigUInt64LE(BigInt(computationOffset), offset); offset += 8;
+  Buffer.from(contactListAccount.toBytes()).copy(data, offset); offset += 32;
+  data.writeUInt32LE(contactListOffset, offset); offset += 4;
+  data.writeUInt32LE(contactListLength, offset); offset += 4;
+  Buffer.from(x25519PubKey).copy(data, offset); offset += 32;
+  Buffer.from(nonce).copy(data, offset); // 16 bytes for u128
+
+  const keys = [
+    { pubkey: signerPubkey, isSigner: true, isWritable: true },
+    { pubkey: getSignPDA(), isSigner: false, isWritable: true },
+    { pubkey: getMXEAddress(), isSigner: false, isWritable: false },
+    { pubkey: getMempoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: getExecutingPoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: getComputationAddress(computationOffset), isSigner: false, isWritable: true },
+    { pubkey: getCompDefAddress('count_accepted'), isSigner: false, isWritable: false },
+    { pubkey: getClusterAddress(), isSigner: false, isWritable: true },
+    { pubkey: ARCIUM_FEE_POOL, isSigner: false, isWritable: true },
+    { pubkey: ARCIUM_CLOCK, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: ARCIUM_PROGRAM_ID, isSigner: false, isWritable: false },
+  ];
+
+  if (session) {
+    keys.push({ pubkey: session.sessionTokenPDA, isSigner: false, isWritable: false });
+  }
+
+  return new TransactionInstruction({ keys, programId: PROGRAM_ID, data });
 }
 
