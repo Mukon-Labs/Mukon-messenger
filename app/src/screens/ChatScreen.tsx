@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, FlatList, StyleSheet, KeyboardAvoidingView, Platform, TouchableOpacity } from 'react-native';
+import { View, FlatList, StyleSheet, KeyboardAvoidingView, Platform, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { TextInput, IconButton, Text, Avatar, Menu, Dialog, Portal, Button } from 'react-native-paper';
 import * as Clipboard from 'expo-clipboard';
 import { PublicKey } from '@solana/web3.js';
@@ -32,6 +32,7 @@ export default function ChatScreen({ route, navigation }: any) {
   const [replyToMessage, setReplyToMessage] = React.useState<any>(null);
   const [quickReactVisible, setQuickReactVisible] = React.useState<string | null>(null);
   const [profileModalVisible, setProfileModalVisible] = React.useState(false);
+  const [isSending, setIsSending] = React.useState(false);
   const wallet = useWallet();
   const messenger = useMessenger();
   const { startCall } = useCall();
@@ -228,10 +229,10 @@ export default function ChatScreen({ route, navigation }: any) {
   const groupsInCommon = React.useMemo(() => {
     if (!wallet.publicKey) return [];
     return messenger.groups
-      .filter(g => g.members.some(m => m.toBase58() === contact.pubkey))
+      .filter(g => (g.members ?? []).some(m => m.toBase58() === contact.pubkey))
       .map(g => ({
         groupId: Buffer.from(g.groupId).toString('hex'),
-        name: g.name,
+        name: g.name ?? '',
         avatar: messenger.groupAvatars.get(Buffer.from(g.groupId).toString('hex')),
       }));
   }, [messenger.groups, messenger.groupAvatars, contact.pubkey, wallet.publicKey]);
@@ -283,19 +284,27 @@ export default function ChatScreen({ route, navigation }: any) {
   }, [navigation, displayName]);
 
   const sendMessage = async () => {
-    if (!message.trim() || !wallet.publicKey) return;
+    if (!message.trim() || !wallet.publicKey || isSending) return;
 
+    setIsSending(true);
     try {
       await messenger.sendMessage(
         conversationId,
         message.trim(),
         new PublicKey(contact.pubkey),
-        replyToMessage?.id // Pass reply-to message ID if replying
+        replyToMessage?.id
       );
       setMessage('');
-      clearReply(); // Clear reply after sending
-    } catch (error) {
-      console.error('Failed to send message:', error);
+      clearReply();
+    } catch (error: any) {
+      const msg = error?.message?.includes('insufficient')
+        ? 'Insufficient SOL balance'
+        : error?.message?.includes('rejected') || error?.message?.includes('declined')
+        ? 'Transaction rejected'
+        : error?.message || 'Failed to send message';
+      showAlert('Error', msg);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -588,9 +597,12 @@ export default function ChatScreen({ route, navigation }: any) {
           placeholderTextColor={theme.colors.textSecondary}
           right={
             <TextInput.Icon
-              icon="send"
+              icon={isSending
+                ? () => <ActivityIndicator size={20} color={theme.colors.primary} />
+                : 'send'}
               onPress={sendMessage}
-              color={message.trim() ? theme.colors.primary : theme.colors.textSecondary}
+              disabled={isSending || !message.trim()}
+              color={message.trim() && !isSending ? theme.colors.primary : theme.colors.textSecondary}
             />
           }
         />

@@ -6,6 +6,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
 import { TextInput, IconButton, Text, Menu, Dialog, Portal, Button, Avatar } from 'react-native-paper';
 import * as Clipboard from 'expo-clipboard';
@@ -56,6 +57,7 @@ export default function GroupChatScreen() {
   const [memberProfiles, setMemberProfiles] = useState<Map<string, { name: string; avatar: string }>>(new Map());
   const [renameDialogVisible, setRenameDialogVisible] = useState(false);
   const [newName, setNewName] = useState('');
+  const [isSending, setIsSending] = useState(false);
   const flatListRef = useRef<FlatList>(null);
   const hasAttemptedBackup = useRef<Set<string>>(new Set());
 
@@ -114,7 +116,7 @@ export default function GroupChatScreen() {
     const loadMemberProfiles = async () => {
       const profiles = new Map<string, { name: string; avatar: string }>();
 
-      for (const memberPubkey of currentGroup.members) {
+      for (const memberPubkey of (currentGroup.members ?? [])) {
         try {
           const profilePDA = getUserProfilePDA(memberPubkey);
           const accountInfo = await connection.getAccountInfo(profilePDA);
@@ -322,20 +324,25 @@ export default function GroupChatScreen() {
   }, [groupMessages, groupId, groupKeys, wallet?.publicKey]);
 
   const handleSend = async () => {
-    if (!messageText.trim()) return;
+    if (!messageText.trim() || isSending) return;
 
+    setIsSending(true);
     try {
       await sendGroupMessage(groupId, messageText.trim());
       setMessageText('');
       clearReply();
-
-      // Scroll to bottom
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
       }, 100);
-    } catch (error) {
-      console.error('Failed to send message:', error);
-      showAlert('Error', 'Failed to send message');
+    } catch (error: any) {
+      const msg = error?.message?.includes('insufficient')
+        ? 'Insufficient SOL balance'
+        : error?.message?.includes('rejected') || error?.message?.includes('declined')
+        ? 'Transaction rejected'
+        : error?.message || 'Failed to send message';
+      showAlert('Error', msg);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -689,9 +696,12 @@ export default function GroupChatScreen() {
           placeholderTextColor={theme.colors.textSecondary}
           right={
             <TextInput.Icon
-              icon="send"
+              icon={isSending
+                ? () => <ActivityIndicator size={20} color={theme.colors.primary} />
+                : 'send'}
               onPress={handleSend}
-              color={messageText.trim() ? theme.colors.primary : theme.colors.textSecondary}
+              disabled={isSending || !messageText.trim()}
+              color={messageText.trim() && !isSending ? theme.colors.primary : theme.colors.textSecondary}
             />
           }
         />

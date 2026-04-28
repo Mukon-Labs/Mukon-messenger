@@ -43,10 +43,10 @@ export default function ContactsScreen({ navigation }: any) {
   const selectedContactGroupsInCommon = React.useMemo(() => {
     if (!selectedContactForProfile || !wallet.publicKey) return [];
     return messenger.groups
-      .filter(g => g.members.some(m => m.toBase58() === selectedContactForProfile.pubkey))
+      .filter(g => (g.members ?? []).some(m => m.toBase58() === selectedContactForProfile.pubkey))
       .map(g => ({
         groupId: Buffer.from(g.groupId).toString('hex'),
-        name: g.name,
+        name: g.name ?? '',
         avatar: messenger.groupAvatars.get(Buffer.from(g.groupId).toString('hex')),
       }));
   }, [messenger.groups, messenger.groupAvatars, selectedContactForProfile, wallet.publicKey]);

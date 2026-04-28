@@ -43,7 +43,7 @@ export default function GroupInfoScreen() {
 
     if (foundGroup && wallet?.publicKey) {
       setIsAdmin(foundGroup.creator.equals(wallet.publicKey));
-      setIsMember(foundGroup.members.some((m: PublicKey) => m.equals(wallet.publicKey)));
+      setIsMember((foundGroup.members ?? []).some((m: PublicKey) => m.equals(wallet.publicKey)));
     }
 
     // Load group avatar and local name
@@ -247,10 +247,10 @@ export default function GroupInfoScreen() {
   const selectedMemberGroupsInCommon = React.useMemo(() => {
     if (!selectedMember || !wallet?.publicKey) return [];
     return messenger.groups
-      .filter(g => g.members.some(m => m.toBase58() === selectedMember.pubkey))
+      .filter(g => (g.members ?? []).some(m => m.toBase58() === selectedMember.pubkey))
       .map(g => ({
         groupId: Buffer.from(g.groupId).toString('hex'),
-        name: g.name,
+        name: g.name ?? '',
         avatar: messenger.groupAvatars.get(Buffer.from(g.groupId).toString('hex')),
       }));
   }, [messenger.groups, messenger.groupAvatars, selectedMember, wallet.publicKey]);
