@@ -1449,6 +1449,24 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       if (accountInfo) {
         console.log('User already registered');
+        // Ensure indexes exist for users registered before private social graph upgrade
+        if (encryptionKeys) {
+          const session = sessionInfoRef.current || undefined;
+          const contactIndexPDA = getContactIndexPDA(wallet.publicKey);
+          const groupIndexPDA = getGroupIndexPDA(wallet.publicKey);
+          const [ciAccount, giAccount] = await Promise.all([
+            connection.getAccountInfo(contactIndexPDA),
+            connection.getAccountInfo(groupIndexPDA),
+          ]);
+          const missing: ReturnType<typeof createCreateContactIndexInstruction>[] = [];
+          if (!ciAccount) missing.push(createCreateContactIndexInstruction(wallet.publicKey));
+          if (!giAccount) missing.push(createCreateGroupIndexInstruction(wallet.publicKey));
+          if (missing.length > 0) {
+            console.log(`⚠️ Creating missing indexes (${missing.length})...`);
+            await signAndSendTransaction(missing);
+            console.log('✅ Indexes created for existing user');
+          }
+        }
         return null;
       }
 
@@ -1462,13 +1480,15 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       const validUntil = Math.floor(Date.now() / 1000) + 7 * 24 * 3600; // 7 days
       const SESSION_FUND_LAMPORTS = Math.floor(0.05 * LAMPORTS_PER_SOL);
 
-      console.log('Creating register + session instructions for:', displayName);
+      console.log('Creating register + indexes + session instructions for:', displayName);
       const registerIx = createRegisterInstruction(
         wallet.publicKey,
         displayName,
         avatarData,
         encryptionKeys.publicKey
       );
+      const createContactIndexIx = createCreateContactIndexInstruction(wallet.publicKey);
+      const createGroupIndexIx = createCreateGroupIndexInstruction(wallet.publicKey);
       const createSessionIx = createCreateSessionInstruction(
         wallet.publicKey,
         newSessionKeypair.publicKey,
@@ -1480,9 +1500,11 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         lamports: SESSION_FUND_LAMPORTS,
       });
 
-      // ONE transaction, ONE wallet popup: register + create session + fund session
-      console.log('Building transaction (register + session + fund)...');
-      const transaction = await buildTransaction(connection, wallet.publicKey, [registerIx, createSessionIx, fundSessionIx]);
+      // ONE transaction, ONE wallet popup: register + indexes + create session + fund session
+      console.log('Building transaction (register + indexes + session + fund)...');
+      const transaction = await buildTransaction(connection, wallet.publicKey, [
+        registerIx, createContactIndexIx, createGroupIndexIx, createSessionIx, fundSessionIx,
+      ]);
 
       console.log('Signing transaction with wallet...');
       const signedTransaction = await wallet.signTransaction(transaction);
