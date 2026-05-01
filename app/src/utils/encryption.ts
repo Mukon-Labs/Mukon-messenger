@@ -249,26 +249,31 @@ export function decryptGroupName(
 }
 
 /**
- * Encrypt an invite sender pubkey for the recipient using nacl.box.
- * Only the recipient (with their private key) can decrypt.
+ * Encrypt an invite sender pubkey for the recipient using an ephemeral keypair.
+ * Ciphertext format: [ephemeralPubkey (32 bytes) || nacl.box output]
+ * Recipient decrypts without knowing the sender's NaCl pubkey — sender identity stays hidden.
  */
 export function encryptSenderForRecipient(
   senderPubkey: PublicKey,
   recipientNaclPubkey: Uint8Array,
-  senderNaclPrivkey: Uint8Array
 ): { ciphertext: Uint8Array; nonce: Uint8Array } {
+  const ephemeral = nacl.box.keyPair();
   const nonce = nacl.randomBytes(nacl.box.nonceLength);
-  const ciphertext = nacl.box(senderPubkey.toBytes(), nonce, recipientNaclPubkey, senderNaclPrivkey);
+  const boxed = nacl.box(senderPubkey.toBytes(), nonce, recipientNaclPubkey, ephemeral.secretKey);
+  const ciphertext = new Uint8Array(32 + boxed.length);
+  ciphertext.set(ephemeral.publicKey, 0);
+  ciphertext.set(boxed, 32);
   return { ciphertext, nonce };
 }
 
 export function decryptSenderFromRecipient(
   ciphertext: Uint8Array,
   nonce: Uint8Array,
-  senderNaclPubkey: Uint8Array,
   recipientNaclPrivkey: Uint8Array
 ): PublicKey | null {
-  const plaintext = nacl.box.open(ciphertext, nonce, senderNaclPubkey, recipientNaclPrivkey);
+  const ephemeralPubkey = ciphertext.slice(0, 32);
+  const boxed = ciphertext.slice(32);
+  const plaintext = nacl.box.open(boxed, nonce, ephemeralPubkey, recipientNaclPrivkey);
   if (!plaintext) return null;
   return new PublicKey(plaintext);
 }

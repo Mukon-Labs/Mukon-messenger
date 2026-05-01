@@ -214,6 +214,7 @@ export function useMukonMessenger(wallet: Wallet | null, cluster: string = 'devn
       const instruction = createRegisterInstruction(
         wallet.publicKey,
         displayName,
+        '',
         encryptionKeys.publicKey
       );
 

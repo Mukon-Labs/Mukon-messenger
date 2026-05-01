@@ -1583,7 +1583,7 @@ async function deriveCompressedAddress(
   programId: PublicKey
 ): Promise<{ address: PublicKey; addressTree: PublicKey; addressQueue: PublicKey }> {
   // Get default address tree info from Light Protocol
-  const addressTreeInfo = await getDefaultAddressTreeInfo(lightRpc);
+  const addressTreeInfo = getDefaultAddressTreeInfo();
   const addressTree = addressTreeInfo.tree;
   const addressQueue = addressTreeInfo.queue;
 
@@ -2338,7 +2338,7 @@ export async function createCheckMutualContactInstruction(
   nonce: Uint8Array,
   session?: SessionInfo,
 ): Promise<TransactionInstruction> {
-  const signerPubkey = session ? session.sessionPubkey : payer;
+  const signerPubkey = session ? session.sessionKey : payer;
 
   const data = Buffer.alloc(8 + 8 + 32 + 4 + 4 + 32 + 16);
   let offset = 0;
@@ -2385,7 +2385,7 @@ export async function createCountAcceptedContactsInstruction(
   nonce: Uint8Array,
   session?: SessionInfo,
 ): Promise<TransactionInstruction> {
-  const signerPubkey = session ? session.sessionPubkey : payer;
+  const signerPubkey = session ? session.sessionKey : payer;
 
   const data = Buffer.alloc(8 + 8 + 32 + 4 + 4 + 32 + 16);
   let offset = 0;

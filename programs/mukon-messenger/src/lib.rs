@@ -27,7 +27,7 @@ pub const LIGHT_CPI_SIGNER: CpiSigner =
 
 const COMP_DEF_OFFSET_IS_MUTUAL_CONTACT: u32 = comp_def_offset("is_mutual_contact");
 const COMP_DEF_OFFSET_COUNT_ACCEPTED: u32 = comp_def_offset("count_accepted");
-const COMP_DEF_OFFSET_ADD_TWO_NUMBERS: u32 = comp_def_offset("add_two_numbers");
+const _COMP_DEF_OFFSET_ADD_TWO_NUMBERS: u32 = comp_def_offset("add_two_numbers");
 
 #[error_code]
 pub enum ErrorCode {
@@ -767,8 +767,6 @@ pub mod mukon_messenger {
         encrypted_key: [u8; 48],
         nonce: [u8; 24],
     ) -> Result<()> {
-        let group = &ctx.accounts.group;
-
         // Set up CPI accounts
         let light_cpi_accounts = CpiAccounts::new(
             ctx.accounts.signer.as_ref(),
