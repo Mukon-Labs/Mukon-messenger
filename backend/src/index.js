@@ -851,6 +851,30 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('send_contact_accepted', ({ inviterPubkey }) => {
+    if (!socket.publicKey) return;
+    console.log(`✅ Contact accepted: ${socket.publicKey.slice(0, 8)}... accepted ${inviterPubkey.slice(0, 8)}...`);
+    const inviterSocketId = onlineUsers.get(inviterPubkey);
+    if (inviterSocketId) {
+      io.to(inviterSocketId).emit('contact_accepted_received', { acceptorPubkey: socket.publicKey });
+      console.log(`✅ Notified ${inviterPubkey.slice(0, 8)}... their invite was accepted`);
+    } else {
+      console.log(`⚠️  Inviter ${inviterPubkey.slice(0, 8)}... is offline — they'll see it on next load`);
+    }
+  });
+
+  socket.on('send_contact_invite', ({ recipientPubkey }) => {
+    if (!socket.publicKey) return;
+    console.log(`📨 Contact invite: ${socket.publicKey.slice(0, 8)}... → ${recipientPubkey.slice(0, 8)}...`);
+    const recipientSocketId = onlineUsers.get(recipientPubkey);
+    if (recipientSocketId) {
+      io.to(recipientSocketId).emit('contact_invite_received', { senderPubkey: socket.publicKey });
+      console.log(`✅ Notified ${recipientPubkey.slice(0, 8)}... of new contact invite`);
+    } else {
+      console.log(`⚠️  Recipient ${recipientPubkey.slice(0, 8)}... is offline — they'll see it on next load`);
+    }
+  });
+
   // ========== VOICE CALL SIGNALING (pure relay, no DB) ==========
 
   socket.on('call_offer', ({ callId, targetPubkey, sdp }) => {

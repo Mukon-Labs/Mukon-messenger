@@ -278,6 +278,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
     // Incoming call offer
     const handleOffer = ({ callId, callerPubkey, sdp }: any) => {
+      console.log('📞 Incoming call_offer received from:', callerPubkey, 'status:', stateRef.current.status);
       // Already in a call — respond busy
       if (stateRef.current.status !== 'idle') {
         socket.emit('call_busy', { callId, targetPubkey: callerPubkey });

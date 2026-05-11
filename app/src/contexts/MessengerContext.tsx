@@ -281,6 +281,19 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     contactsRef.current = contacts;
   }, [contacts]);
 
+  // Proactively join conversation rooms for all accepted contacts so messages
+  // arrive in real-time even before the user opens a specific chat.
+  useEffect(() => {
+    if (!socket || !wallet?.publicKey) return;
+    contacts
+      .filter(c => c.state === 'Accepted')
+      .forEach(c => {
+        const chatHash = getChatHash(wallet.publicKey!, c.publicKey);
+        const conversationId = Buffer.from(chatHash).toString('hex');
+        socket.emit('join_conversation', { conversationId });
+      });
+  }, [contacts, socket, wallet?.publicKey]);
+
   useEffect(() => {
     groupKeysRef.current = groupKeys;
   }, [groupKeys]);
@@ -1174,6 +1187,16 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       loadContacts();
     });
 
+    newSocket.on('contact_invite_received', ({ senderPubkey }) => {
+      console.log('📨 New contact invite from:', senderPubkey);
+      loadContacts();
+    });
+
+    newSocket.on('contact_accepted_received', ({ acceptorPubkey }) => {
+      console.log('✅ Contact accepted by:', acceptorPubkey);
+      loadContacts();
+    });
+
     // Feature 5: Message acks and read receipts (Groups)
     newSocket.on('group_message_ack', ({ messageId, groupId, timestamp }) => {
       setGroupMessages((prev) => {
@@ -1487,8 +1510,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         avatarData,
         encryptionKeys.publicKey
       );
-      const createContactIndexIx = createCreateContactIndexInstruction(wallet.publicKey);
-      const createGroupIndexIx = createCreateGroupIndexInstruction(wallet.publicKey);
+
+      // Check which index PDAs already exist (survive close_profile)
+      const [existingCI, existingGI] = await Promise.all([
+        connection.getAccountInfo(getContactIndexPDA(wallet.publicKey)),
+        connection.getAccountInfo(getGroupIndexPDA(wallet.publicKey)),
+      ]);
+
       const createSessionIx = createCreateSessionInstruction(
         wallet.publicKey,
         newSessionKeypair.publicKey,
@@ -1500,11 +1528,14 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         lamports: SESSION_FUND_LAMPORTS,
       });
 
-      // ONE transaction, ONE wallet popup: register + indexes + create session + fund session
+      const ixs = [registerIx];
+      if (!existingCI) ixs.push(createCreateContactIndexInstruction(wallet.publicKey));
+      if (!existingGI) ixs.push(createCreateGroupIndexInstruction(wallet.publicKey));
+      ixs.push(createSessionIx, fundSessionIx);
+
+      // ONE transaction, ONE wallet popup: register + indexes (if needed) + create session + fund session
       console.log('Building transaction (register + indexes + session + fund)...');
-      const transaction = await buildTransaction(connection, wallet.publicKey, [
-        registerIx, createContactIndexIx, createGroupIndexIx, createSessionIx, fundSessionIx,
-      ]);
+      const transaction = await buildTransaction(connection, wallet.publicKey, ixs);
 
       console.log('Signing transaction with wallet...');
       const signedTransaction = await wallet.signTransaction(transaction);
@@ -1575,8 +1606,12 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     }
 
     const { ciphertext, nonce } = encryptContactIndexEntries(entries, encryptionKeys.secretKey);
-    const ix = createUpdateContactIndexInstruction(wallet.publicKey, ciphertext, nonce, session);
-    await signAndSendTransaction([ix]);
+    const instructions = [];
+    if (!indexAccount) {
+      instructions.push(createCreateContactIndexInstruction(wallet.publicKey));
+    }
+    instructions.push(createUpdateContactIndexInstruction(wallet.publicKey, ciphertext, nonce, session));
+    await signAndSendTransaction(instructions);
   };
 
   const updateGroupIndex = async (
@@ -1606,8 +1641,12 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     }
 
     const { ciphertext, nonce } = encryptGroupIndexEntries(groupIds, encryptionKeys.secretKey);
-    const ix = createUpdateGroupIndexInstruction(wallet.publicKey, ciphertext, nonce, session);
-    await signAndSendTransaction([ix]);
+    const instructions = [];
+    if (!indexAccount) {
+      instructions.push(createCreateGroupIndexInstruction(wallet.publicKey));
+    }
+    instructions.push(createUpdateGroupIndexInstruction(wallet.publicKey, ciphertext, nonce, session));
+    await signAndSendTransaction(instructions);
   };
 
   // Other functions (updateProfile, invite, etc.)
@@ -1706,17 +1745,9 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       await loadContacts();
 
-      // System message — use randomId as the private conversation channel ID
+      // Notify recipient in real-time via direct socket (if online)
       if (socket) {
-        const conversationId = Buffer.from(randomId).toString('hex');
-        socket.emit('send_message', {
-          conversationId,
-          sender: wallet.publicKey.toBase58(),
-          recipient: inviteePubkey.toBase58(),
-          type: 'system',
-          content: `You've been invited to chat on Mukon! Accept the invitation to start messaging.`,
-          timestamp: Date.now(),
-        });
+        socket.emit('send_contact_invite', { recipientPubkey: inviteePubkey.toBase58() });
         console.log('📨 Sent private invitation');
       }
 
@@ -1756,16 +1787,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       await loadContacts();
 
       if (socket) {
-        const conversationId = Buffer.from(randomId).toString('hex');
-        socket.emit('send_message', {
-          conversationId,
-          sender: wallet.publicKey.toBase58(),
-          recipient: inviterPubkey.toBase58(),
-          type: 'system',
-          content: `Invitation accepted! You can now chat securely.`,
-          timestamp: Date.now(),
-        });
-        console.log('📨 Sent acceptance system message');
+        socket.emit('send_contact_accepted', { inviterPubkey: inviterPubkey.toBase58() });
+        console.log('📨 Notified inviter of acceptance');
       }
 
       return txSignature;
@@ -2026,11 +2049,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const leaveConversation = (conversationId: string) => {
-    if (socket) {
-      socket.emit('leave_conversation', { conversationId });
-      setActiveConversation(null);
-      console.log('Leaving conversation:', conversationId);
-    }
+    // Don't leave the socket room — stay subscribed so messages arrive in real-time
+    // even when the user is on a different screen. Unread badge logic still works
+    // via activeConversation ref.
+    setActiveConversation(null);
   };
 
   const decryptConversationMessage = (
@@ -2283,6 +2305,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       // Incoming invites that we haven't responded to (state = 'Requested')
       const invitePointers = await connection.getProgramAccounts(PROGRAM_ID, {
         filters: [
+          // InvitePointer account discriminator (sha256("account:InvitePointer")[0..8])
+          { memcmp: { offset: 0, bytes: bs58.encode(Buffer.from([12, 10, 100, 71, 63, 152, 136, 96])) } },
           { memcmp: { offset: 8, bytes: myKey.toBase58() } }, // recipient field
         ],
       });

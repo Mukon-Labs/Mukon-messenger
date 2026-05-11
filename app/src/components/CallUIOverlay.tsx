@@ -16,7 +16,7 @@ export default function CallUIOverlay() {
   return (
     <>
       <IncomingCallModal
-        visible={showIncomingCall}
+        visible={!!showIncomingCall}
         caller={partner}
         onAccept={acceptCall}
         onDecline={declineCall}
