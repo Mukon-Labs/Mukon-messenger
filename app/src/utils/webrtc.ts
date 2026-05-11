@@ -5,11 +5,36 @@ import {
   mediaDevices,
   MediaStream,
 } from 'react-native-webrtc';
+import { METERED_API_KEY, METERED_APP } from '../config';
 
-const ICE_SERVERS = [
+const FALLBACK_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
+
+let cachedIceServers: any[] | null = null;
+let cacheTime = 0;
+const CACHE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+async function getIceServers(): Promise<any[]> {
+  if (cachedIceServers && Date.now() - cacheTime < CACHE_TTL_MS) {
+    return cachedIceServers;
+  }
+  try {
+    const res = await fetch(
+      `https://${METERED_APP}.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`
+    );
+    const servers = await res.json();
+    if (Array.isArray(servers) && servers.length > 0) {
+      cachedIceServers = servers;
+      cacheTime = Date.now();
+      return servers;
+    }
+  } catch (e) {
+    console.warn('⚠️ Failed to fetch TURN credentials, falling back to STUN only:', e);
+  }
+  return FALLBACK_ICE_SERVERS;
+}
 
 export interface WebRTCCallbacks {
   onIceCandidate: (candidate: any) => void;
@@ -35,8 +60,8 @@ export class WebRTCCall {
       video: false,
     }) as MediaStream;
 
-    // Create peer connection
-    this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const iceServers = await getIceServers();
+    this.pc = new RTCPeerConnection({ iceServers });
 
     // Add local tracks
     this.localStream.getTracks().forEach((track: any) => {

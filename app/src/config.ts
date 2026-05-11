@@ -14,6 +14,10 @@ export const SOLANA_RPC_URL = CLUSTER === 'mainnet-beta'
   ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_MAINNET_KEY}`
   : `https://devnet.helius-rpc.com/?api-key=${HELIUS_DEVNET_KEY}`;
 
+// Metered.ca TURN server — ROTATE BEFORE PUBLIC RELEASE
+export const METERED_API_KEY = '807cc8a2e11bdea7a30afada05538b62f797';
+export const METERED_APP = 'mukonmessenger';
+
 // Light Protocol RPC (wraps Helius for ZK Compression support)
 // V2 Architecture: 6-account CPI structure with CPI signer PDA
 import { createRpc, featureFlags } from '@lightprotocol/stateless.js';
