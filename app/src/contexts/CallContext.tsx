@@ -4,6 +4,7 @@ import { PublicKey } from '@solana/web3.js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useMessenger } from './MessengerContext';
 import { WebRTCCall } from '../utils/webrtc';
+import notifee from '@notifee/react-native';
 import { sendCallNotification } from '../utils/notifications';
 import { getChatHash } from '../utils/encryption';
 
@@ -338,6 +339,17 @@ export function CallProvider({ children }: { children: ReactNode }) {
       // Fire local notification so user sees call even if app is backgrounded
       sendCallNotification(displayName, callerPubkey);
 
+      // Safety net: if call_end/decline never arrives (caller cancelled while callee was
+      // backgrounded and missed the event), auto-dismiss after 35s
+      ringTimeoutRef.current = setTimeout(() => {
+        if (stateRef.current.status === 'ringing' && callIdRef.current === callId) {
+          console.log('📞 Callee ring timeout — auto-dismissing stale call UI');
+          notifee.cancelNotification('incoming-call');
+          cleanup();
+          setState(initialState);
+        }
+      }, 35000);
+
       // If user tapped Decline from the notification while app was backgrounded,
       // process it now that the socket is live
       AsyncStorage.getItem('@mukon_pending_decline').then((val) => {
@@ -397,6 +409,10 @@ export function CallProvider({ children }: { children: ReactNode }) {
     const handleEnd = ({ callId }: any) => {
       if (callId !== callIdRef.current) return;
       console.log('📞 Call ended by remote');
+      if (ringTimeoutRef.current) {
+        clearTimeout(ringTimeoutRef.current);
+        ringTimeoutRef.current = null;
+      }
       cleanup();
       setState(prev => ({ ...prev, status: 'ended' }));
     };

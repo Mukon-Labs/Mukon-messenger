@@ -64,6 +64,7 @@ const memPendingKeyShares = new Map(); // groupId -> Map<recipientPubkey, { encr
 const onlineUsers = new Map(); // pubkey -> socket.id
 const groupRooms = new Map(); // groupId -> Set<socket.id>
 const pendingCalls = new Map(); // targetPubkey -> { callId, callerPubkey, sdp, callerSocketId, expiresAt }
+const pendingCallEnds = new Map(); // targetPubkey -> { callId, expiresAt } — buffered call_end/decline for offline callee
 
 // ========== STORAGE ABSTRACTION ==========
 // Each function checks db.isEnabled() and falls back to in-memory Maps
@@ -389,6 +390,14 @@ io.on('connection', (socket) => {
         });
         pendingCalls.delete(publicKey);
         console.log(`📞 Delivered buffered call ${pending.callId.slice(0, 8)}... to reconnected ${publicKey.slice(0, 8)}...`);
+      }
+
+      // Deliver any buffered call_end or call_decline (caller cancelled while callee was offline)
+      const pendingEnd = pendingCallEnds.get(publicKey);
+      if (pendingEnd && Date.now() < pendingEnd.expiresAt) {
+        socket.emit(pendingEnd.event, { callId: pendingEnd.callId });
+        pendingCallEnds.delete(publicKey);
+        console.log(`📞 Delivered buffered ${pendingEnd.event} ${pendingEnd.callId.slice(0, 8)}... to reconnected ${publicKey.slice(0, 8)}...`);
       }
     } else {
       socket.emit('authenticated', { success: false, error: 'Invalid signature' });
@@ -999,6 +1008,9 @@ io.on('connection', (socket) => {
     if (targetSocketId) {
       io.to(targetSocketId).emit('call_decline', { callId });
       console.log(`📞 Call ${callId.slice(0, 8)}... declined by ${socket.publicKey.slice(0, 8)}...`);
+    } else {
+      pendingCallEnds.set(targetPubkey, { callId, event: 'call_decline', expiresAt: Date.now() + 30000 });
+      setTimeout(() => pendingCallEnds.delete(targetPubkey), 30000);
     }
   });
 
@@ -1008,6 +1020,9 @@ io.on('connection', (socket) => {
     if (targetSocketId) {
       io.to(targetSocketId).emit('call_end', { callId });
       console.log(`📞 Call ${callId.slice(0, 8)}... ended by ${socket.publicKey.slice(0, 8)}...`);
+    } else {
+      pendingCallEnds.set(targetPubkey, { callId, event: 'call_end', expiresAt: Date.now() + 30000 });
+      setTimeout(() => pendingCallEnds.delete(targetPubkey), 30000);
     }
   });
 

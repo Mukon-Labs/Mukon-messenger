@@ -56,15 +56,19 @@ export async function initializeNotifications(): Promise<boolean> {
 
       // Android 14+ (API 34): USE_FULL_SCREEN_INTENT is not auto-granted.
       // Direct user to the specific settings page once so full-screen call popup works.
+      // Wrapped in its own try/catch — must not break channel creation if it throws.
       if (Platform.Version >= 34) {
         const prompted = await AsyncStorage.getItem('@mukon_fsi_prompted');
         if (!prompted) {
           await AsyncStorage.setItem('@mukon_fsi_prompted', '1');
-          console.log('⚠️ Android 14+ — opening full screen intent settings');
-          await Linking.sendIntent(
-            'android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENTS',
-            [{ key: 'android.provider.extra.APP_PACKAGE', value: 'com.mukon.messenger' }]
-          );
+          try {
+            await Linking.sendIntent(
+              'android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENTS',
+              [{ key: 'android.provider.extra.APP_PACKAGE', value: 'com.mukon.messenger' }]
+            );
+          } catch (e) {
+            console.warn('⚠️ Could not open full screen intent settings:', e);
+          }
         }
       }
     }
