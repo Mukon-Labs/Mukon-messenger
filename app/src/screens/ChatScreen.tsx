@@ -17,6 +17,12 @@ import AvatarDisplay from '../components/AvatarDisplay';
 import { useDarkAlert } from '../components/DarkAlert';
 import { useCall } from '../contexts/CallContext';
 
+function formatCallDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
+
 export default function ChatScreen({ route, navigation }: any) {
   const { contact } = route.params;
   const { showAlert, DarkAlertComponent } = useDarkAlert();
@@ -87,6 +93,19 @@ export default function ChatScreen({ route, navigation }: any) {
         timestamp: new Date(msg.timestamp || Date.now()),
         isMe: false,
         isSystem: true,
+      };
+    }
+
+    // Call history entries
+    if (msg.type === 'call') {
+      return {
+        id: msg.id || `${idx}`,
+        sender: msg.sender,
+        content: msg.content,
+        timestamp: new Date(msg.timestamp || Date.now()),
+        isMe: false,
+        isSystem: false,
+        isCall: true,
       };
     }
 
@@ -395,6 +414,28 @@ export default function ChatScreen({ route, navigation }: any) {
           </Text>
         </View>
       );
+    }
+
+    // Call history entries
+    if (item.isCall) {
+      try {
+        const { callType, duration } = JSON.parse(item.content || '{}');
+        const durationStr = duration ? ` · ${formatCallDuration(duration)}` : '';
+        const icon = callType === 'missed' || callType === 'declined' ? '📵' : '📞';
+        const label = callType === 'missed' ? 'Missed call'
+          : callType === 'declined' ? 'Declined call'
+          : `Call${durationStr}`;
+        return (
+          <View style={styles.systemMessageContainer}>
+            <Text style={styles.systemMessage}>{icon} {label}</Text>
+            <Text style={styles.systemTimestamp}>
+              {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          </View>
+        );
+      } catch {
+        return null;
+      }
     }
 
     // Regular encrypted messages with avatar for incoming messages

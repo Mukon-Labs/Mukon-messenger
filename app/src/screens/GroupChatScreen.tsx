@@ -24,6 +24,12 @@ import { getUserProfilePDA, createStoreGroupKeyInstruction, buildTransaction } f
 import { getGroupAvatar } from '../utils/domains';
 import { useDarkAlert } from '../components/DarkAlert';
 
+function formatCallDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
+
 export default function GroupChatScreen() {
   const route = useRoute();
   const navigation = useNavigation();
@@ -459,6 +465,28 @@ export default function GroupChatScreen() {
   };
 
   const renderMessage = ({ item }: { item: any }) => {
+    // Call history entries
+    if (item.type === 'call') {
+      try {
+        const { callType, duration } = JSON.parse(item.content || '{}');
+        const durationStr = duration ? ` · ${formatCallDuration(duration)}` : '';
+        const icon = callType === 'missed' || callType === 'declined' ? '📵' : '📞';
+        const label = callType === 'missed' ? 'Missed call'
+          : callType === 'declined' ? 'Declined call'
+          : `Call${durationStr}`;
+        return (
+          <View style={styles.systemMessageContainer}>
+            <Text style={styles.systemMessage}>{icon} {label}</Text>
+            <Text style={styles.systemTimestamp}>
+              {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          </View>
+        );
+      } catch {
+        return null;
+      }
+    }
+
     // Get member profile
     const memberProfile = memberProfiles.get(item.sender);
     const senderName = memberProfile?.name || item.sender.slice(0, 8);
@@ -934,5 +962,25 @@ const styles = StyleSheet.create({
   },
   quickReactEmoji: {
     fontSize: 28,
+  },
+  systemMessageContainer: {
+    alignItems: 'center',
+    marginVertical: 8,
+    paddingHorizontal: 16,
+  },
+  systemMessage: {
+    color: theme.colors.textSecondary,
+    fontSize: 14,
+    fontStyle: 'italic',
+    textAlign: 'center',
+    backgroundColor: theme.colors.surface,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  systemTimestamp: {
+    color: theme.colors.textSecondary,
+    fontSize: 10,
+    marginTop: 4,
   },
 });

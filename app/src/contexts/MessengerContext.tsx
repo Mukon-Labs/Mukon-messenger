@@ -2355,6 +2355,11 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       const accountInfo = await connection.getAccountInfo(userProfile);
 
       if (!accountInfo) {
+        const cached = await AsyncStorage.getItem(`@mukon_profile_${wallet.publicKey.toBase58()}`);
+        if (cached) {
+          console.warn('⚠️ Profile PDA not found on-chain but cache exists — keeping cached profile (transient RPC miss?)');
+          return;
+        }
         console.log('No profile found, user needs to register');
         setProfile(null);
         return;
@@ -2362,7 +2367,6 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       if (!encryptionKeys) {
         console.warn('⚠️ Encryption keys not yet available, will retry when ready');
-        setProfile(null);
         return;
       }
 
@@ -2416,7 +2420,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       }
     } catch (error) {
       console.error('Failed to load profile:', error);
-      setProfile(null);
+      // Don't setProfile(null) on network/RPC errors — keep cached profile
     }
   };
 

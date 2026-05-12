@@ -1019,6 +1019,25 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('call_event', async ({ targetPubkey, conversationId, callType, duration }) => {
+    if (!socket.publicKey || !conversationId) return;
+    const msg = {
+      id: `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      type: 'call',
+      conversationId,
+      content: JSON.stringify({ callType, duration: duration ?? null, initiator: socket.publicKey }),
+      sender: socket.publicKey,
+      timestamp: Date.now(),
+    };
+    // Save so it loads on history fetch
+    await store.saveMessage(conversationId, msg);
+    // Deliver to both parties
+    const targetSocketId = onlineUsers.get(targetPubkey);
+    if (targetSocketId) io.to(targetSocketId).emit('message_received', msg);
+    socket.emit('message_received', msg);
+    console.log(`📞 Call event: ${callType} in conv ${conversationId.slice(0, 8)}...`);
+  });
+
   socket.on('disconnect', () => {
     if (socket.publicKey) {
       onlineUsers.delete(socket.publicKey);

@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
-import { Platform } from 'react-native';
+import { Platform, Linking } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import notifee, {
   AndroidCategory,
   AndroidImportance,
@@ -52,6 +53,20 @@ export async function initializeNotifications(): Promise<boolean> {
       });
 
       console.log('✅ Android notification channel created');
+
+      // Android 14+ (API 34): USE_FULL_SCREEN_INTENT is not auto-granted.
+      // Direct user to the specific settings page once so full-screen call popup works.
+      if (Platform.Version >= 34) {
+        const prompted = await AsyncStorage.getItem('@mukon_fsi_prompted');
+        if (!prompted) {
+          await AsyncStorage.setItem('@mukon_fsi_prompted', '1');
+          console.log('⚠️ Android 14+ — opening full screen intent settings');
+          await Linking.sendIntent(
+            'android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENTS',
+            [{ key: 'android.provider.extra.APP_PACKAGE', value: 'com.mukon.messenger' }]
+          );
+        }
+      }
     }
 
     return true;
@@ -148,7 +163,7 @@ export async function sendCallNotification(
         ],
         sound: 'default',
         vibrationPattern: [0, 500, 250, 500, 250, 500],
-        lights: [0xff22c55e, 500, 500],
+        lights: ['#22c55e', 500, 500],
       },
     });
 

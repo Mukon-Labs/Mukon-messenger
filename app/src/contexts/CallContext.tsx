@@ -1,8 +1,11 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect, ReactNode } from 'react';
 import { Platform, PermissionsAndroid } from 'react-native';
+import { PublicKey } from '@solana/web3.js';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useMessenger } from './MessengerContext';
 import { WebRTCCall } from '../utils/webrtc';
 import { sendCallNotification } from '../utils/notifications';
+import { getChatHash } from '../utils/encryption';
 
 // Types
 export type CallStatus = 'idle' | 'calling' | 'ringing' | 'active' | 'ended' | 'unavailable' | 'declined';
@@ -65,7 +68,7 @@ async function requestMicPermission(): Promise<boolean> {
 }
 
 export function CallProvider({ children }: { children: ReactNode }) {
-  const { socket, contacts } = useMessenger();
+  const { socket, contacts, wallet } = useMessenger();
   const [state, setState] = useState<CallState>(initialState);
 
   const webrtcRef = useRef<WebRTCCall | null>(null);
@@ -104,6 +107,24 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setState(prev => ({ ...prev, status: 'ended' }));
     setTimeout(() => setState(initialState), 1500);
   }, [cleanup]);
+
+  // Emits a call history event so both parties see it in the chat thread.
+  // Only call from the ACTIVE side (endCall/declineCall/ring timeout) — never from passive handlers.
+  const emitCallEvent = useCallback((callType: 'ended' | 'declined' | 'missed', duration?: number | null) => {
+    if (!socket || !partnerPubkeyRef.current || !wallet?.publicKey) return;
+    try {
+      const chatHash = getChatHash(wallet.publicKey, new PublicKey(partnerPubkeyRef.current));
+      const conversationId = Buffer.from(chatHash).toString('hex');
+      socket.emit('call_event', {
+        targetPubkey: partnerPubkeyRef.current,
+        conversationId,
+        callType,
+        duration: duration ?? null,
+      });
+    } catch (e) {
+      console.warn('📞 Failed to emit call_event:', e);
+    }
+  }, [socket, wallet]);
 
   // ========== OUTGOING CALL ==========
   const startCall = useCallback(async (contact: Contact) => {
@@ -162,6 +183,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
             callId: callIdRef.current,
             targetPubkey: partnerPubkeyRef.current,
           });
+          emitCallEvent('missed');
           cleanup();
           setState(prev => ({ ...prev, status: 'unavailable' }));
         }
@@ -170,7 +192,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       console.error('📞 Failed to start call:', err);
       resetToIdle();
     }
-  }, [socket, endWithStatus, resetToIdle]);
+  }, [socket, emitCallEvent, endWithStatus, resetToIdle]);
 
   // ========== ACCEPT INCOMING CALL ==========
   const acceptCall = useCallback(async () => {
@@ -238,19 +260,22 @@ export function CallProvider({ children }: { children: ReactNode }) {
         targetPubkey: partnerPubkeyRef.current,
       });
     }
+    emitCallEvent('declined');
     endWithStatus();
-  }, [socket, endWithStatus]);
+  }, [socket, emitCallEvent, endWithStatus]);
 
   // ========== END CALL ==========
   const endCall = useCallback(() => {
+    const duration = stateRef.current.startTime ? Date.now() - stateRef.current.startTime : null;
     if (socket && callIdRef.current && partnerPubkeyRef.current) {
       socket.emit('call_end', {
         callId: callIdRef.current,
         targetPubkey: partnerPubkeyRef.current,
       });
     }
+    emitCallEvent('ended', duration);
     endWithStatus();
-  }, [socket, endWithStatus]);
+  }, [socket, emitCallEvent, endWithStatus]);
 
   // ========== MUTE / SPEAKER ==========
   const toggleMute = useCallback(() => {
@@ -312,6 +337,19 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
       // Fire local notification so user sees call even if app is backgrounded
       sendCallNotification(displayName, callerPubkey);
+
+      // If user tapped Decline from the notification while app was backgrounded,
+      // process it now that the socket is live
+      AsyncStorage.getItem('@mukon_pending_decline').then((val) => {
+        if (val) {
+          AsyncStorage.removeItem('@mukon_pending_decline');
+          if (socket && callIdRef.current && partnerPubkeyRef.current) {
+            socket.emit('call_decline', { callId: callIdRef.current, targetPubkey: partnerPubkeyRef.current });
+          }
+          emitCallEvent('declined');
+          endWithStatus();
+        }
+      });
     };
 
     // Call answered by callee
@@ -395,7 +433,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       socket.off('call_end', handleEnd);
       socket.off('call_busy', handleBusy);
     };
-  }, [socket, contacts, cleanup]);
+  }, [socket, contacts, cleanup, emitCallEvent, endWithStatus]);
 
   return (
     <CallContext.Provider
