@@ -41,10 +41,7 @@
     },
     "scheme": "mukon",
     "plugins": [
-      ["@react-native-firebase/app", {
-        "android": { "googleServicesFile": "./google-services.json" }
-      }],
-      "@react-native-firebase/messaging"
+      "./plugins/withFirebase"
     ]
   }
 }
