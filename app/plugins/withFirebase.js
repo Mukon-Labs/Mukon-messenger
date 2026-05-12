@@ -45,10 +45,15 @@ const withFirebase = (config) => {
     return cfg;
   });
 
-  // 4. Set android.minSdkVersion=24 (react-native-webrtc requires 24, Expo defaults to 23)
+  // 4. Gradle properties: minSdkVersion=24 + increased heap for Jetifier
   config = withGradleProperties(config, (cfg) => {
-    cfg.modResults = cfg.modResults.filter((item) => item.key !== 'android.minSdkVersion');
-    cfg.modResults.push({ type: 'property', key: 'android.minSdkVersion', value: '24' });
+    const set = (key, value) => {
+      cfg.modResults = cfg.modResults.filter((item) => item.key !== key);
+      cfg.modResults.push({ type: 'property', key, value });
+    };
+    set('android.minSdkVersion', '24');
+    set('org.gradle.jvmargs', '-Xmx4096m -XX:MaxMetaspaceSize=512m');
+    set('org.gradle.parallel', 'true');
     return cfg;
   });
 
