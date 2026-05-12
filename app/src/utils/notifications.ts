@@ -1,5 +1,10 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import notifee, {
+  AndroidCategory,
+  AndroidImportance,
+  AndroidVisibility,
+} from '@notifee/react-native';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -44,15 +49,6 @@ export async function initializeNotifications(): Promise<boolean> {
         vibrationPattern: [0, 250, 250, 250],
         lightColor: '#FF6B6B',
         sound: 'default',
-      });
-
-      await Notifications.setNotificationChannelAsync('calls', {
-        name: 'Calls',
-        importance: Notifications.AndroidImportance.MAX,
-        vibrationPattern: [0, 500, 250, 500],
-        lightColor: '#22C55E',
-        sound: 'default',
-        bypassDnd: true,
       });
 
       console.log('✅ Android notification channel created');
@@ -106,22 +102,56 @@ export async function sendMessageNotification(
   }
 }
 
+// Full-screen incoming call notification via notifee.
+// On a locked/off screen: wakes the device and shows full-screen overlay.
+// When phone is in use: shows a large heads-up banner with Accept/Decline.
 export async function sendCallNotification(
   callerName: string,
   callerPubkey: string
 ): Promise<void> {
   try {
     const displayName = callerName || `${callerPubkey.slice(0, 8)}...`;
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: 'Incoming call',
-        body: `${displayName} is calling...`,
-        data: { type: 'call', senderPubkey: callerPubkey },
-        sound: 'default',
-        ...(Platform.OS === 'android' && { android: { channelId: 'calls' } } as any),
-      },
-      trigger: null,
+
+    const channelId = await notifee.createChannel({
+      id: 'calls',
+      name: 'Incoming Calls',
+      importance: AndroidImportance.HIGH,
+      vibration: true,
+      sound: 'default',
+      bypassDnd: true,
     });
+
+    await notifee.displayNotification({
+      id: 'incoming-call',
+      title: 'Incoming call',
+      body: `${displayName} is calling...`,
+      android: {
+        channelId,
+        category: AndroidCategory.CALL,
+        importance: AndroidImportance.HIGH,
+        visibility: AndroidVisibility.PUBLIC,
+        // Wakes screen and shows full-screen overlay on locked/off screen
+        fullScreenAction: {
+          id: 'default',
+          launchActivity: 'default',
+        },
+        pressAction: { id: 'default', launchActivity: 'default' },
+        actions: [
+          {
+            title: '📵 Decline',
+            pressAction: { id: 'decline' },
+          },
+          {
+            title: '📞 Accept',
+            pressAction: { id: 'accept' },
+          },
+        ],
+        sound: 'default',
+        vibrationPattern: [0, 500, 250, 500, 250, 500],
+        lights: [0xff22c55e, 500, 500],
+      },
+    });
+
     console.log(`✅ Call notification sent for ${displayName}`);
   } catch (error) {
     console.error('❌ Failed to send call notification:', error);
@@ -136,12 +166,8 @@ export async function setBadgeCount(count: number): Promise<void> {
   }
 }
 
-// FCM setup — no-ops gracefully if @react-native-firebase/messaging is not installed
-// or google-services.json is not present. Activated by dropping google-services.json
-// and running npm run build:prebuild.
 export async function setupFcm(socket: any): Promise<void> {
   try {
-    // Modular API (react-native-firebase v22+)
     const { getMessaging, getToken, setBackgroundMessageHandler } =
       require('@react-native-firebase/messaging');
     const messagingInstance = getMessaging();
