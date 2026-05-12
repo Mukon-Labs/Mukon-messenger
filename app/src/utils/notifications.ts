@@ -141,13 +141,14 @@ export async function setBadgeCount(count: number): Promise<void> {
 // and running npm run build:prebuild.
 export async function setupFcm(socket: any): Promise<void> {
   try {
-    // Dynamic require so the app doesn't crash when Firebase is not configured
-    const messaging = require('@react-native-firebase/messaging').default;
-    const token = await messaging().getToken();
+    // Modular API (react-native-firebase v22+)
+    const { getMessaging, getToken, setBackgroundMessageHandler } =
+      require('@react-native-firebase/messaging');
+    const messagingInstance = getMessaging();
+    const token = await getToken(messagingInstance);
     socket.emit('register_fcm_token', { token });
 
-    // Handle FCM messages when app is closed or backgrounded
-    messaging().setBackgroundMessageHandler(async (remoteMessage: any) => {
+    setBackgroundMessageHandler(messagingInstance, async (remoteMessage: any) => {
       if (remoteMessage.data?.type === 'incoming_call') {
         await sendCallNotification(
           remoteMessage.data.callerName || 'Unknown',
@@ -157,7 +158,7 @@ export async function setupFcm(socket: any): Promise<void> {
     });
 
     console.log('✅ FCM token registered');
-  } catch (e) {
-    console.log('⚠️ FCM not configured (expected until google-services.json is added)');
+  } catch (e: any) {
+    console.warn('⚠️ FCM setup failed:', e?.message || e);
   }
 }

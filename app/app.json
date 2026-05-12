@@ -39,6 +39,12 @@
     "web": {
       "favicon": "../assets/ICON.png"
     },
-    "scheme": "mukon"
+    "scheme": "mukon",
+    "plugins": [
+      ["@react-native-firebase/app", {
+        "android": { "googleServicesFile": "./google-services.json" }
+      }],
+      "@react-native-firebase/messaging"
+    ]
   }
 }
