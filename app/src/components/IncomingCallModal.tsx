@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, Modal, Animated } from 'react-native';
-import { Text, Button } from 'react-native-paper';
+import { View, StyleSheet, Modal, Animated, TouchableOpacity, Text } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useCall, Contact } from '../contexts/CallContext';
 import AvatarDisplay from './AvatarDisplay';
+import { Contact } from '../contexts/CallContext';
 
 interface IncomingCallModalProps {
   visible: boolean;
@@ -39,23 +38,15 @@ export default function IncomingCallModal({ visible, caller, onAccept, onDecline
           <Text style={styles.callingText}>incoming call...</Text>
 
           <View style={styles.actions}>
-            <Button
-              mode="contained"
-              onPress={onDecline}
-              style={[styles.declineButton, { backgroundColor: '#EF4444' }]}
-              labelStyle={styles.buttonLabel}
-            >
-              <MaterialCommunityIcons name="phone-hangup" size={24} color="#fff" />
-            </Button>
+            <TouchableOpacity onPress={onDecline} style={[styles.callButton, styles.declineButton]}>
+              <MaterialCommunityIcons name="phone-hangup" size={30} color="#fff" />
+              <Text style={styles.buttonLabel}>Decline</Text>
+            </TouchableOpacity>
 
-            <Button
-              mode="contained"
-              onPress={onAccept}
-              style={[styles.acceptButton, { backgroundColor: '#22C55E' }]}
-              labelStyle={styles.buttonLabel}
-            >
-              <MaterialCommunityIcons name="phone" size={24} color="#fff" />
-            </Button>
+            <TouchableOpacity onPress={onAccept} style={[styles.callButton, styles.acceptButton]}>
+              <MaterialCommunityIcons name="phone" size={30} color="#fff" />
+              <Text style={styles.buttonLabel}>Accept</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </View>
@@ -91,21 +82,25 @@ const styles = StyleSheet.create({
   actions: {
     flexDirection: 'row',
     justifyContent: 'center',
-    gap: 40,
+    gap: 50,
+  },
+  callButton: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   declineButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    justifyContent: 'center',
+    backgroundColor: '#EF4444',
   },
   acceptButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    justifyContent: 'center',
+    backgroundColor: '#22C55E',
   },
   buttonLabel: {
-    margin: 0,
+    color: '#fff',
+    fontSize: 12,
+    marginTop: 4,
+    fontWeight: '600',
   },
 });

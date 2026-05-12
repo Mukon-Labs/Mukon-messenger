@@ -7,6 +7,36 @@ const nacl = require('tweetnacl');
 const bs58 = require('bs58').default; // bs58 v6 uses default export
 const db = require('./db');
 
+// Firebase Admin — dormant until FIREBASE_SERVICE_ACCOUNT env var is set
+let fcmAdmin = null;
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    const admin = require('firebase-admin');
+    admin.initializeApp({
+      credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+    });
+    fcmAdmin = admin;
+    console.log('✅ Firebase Admin initialized');
+  } catch (e) {
+    console.warn('⚠️ Firebase Admin init failed:', e.message);
+  }
+}
+
+async function sendFcmNotification(token, data) {
+  if (!fcmAdmin || !token) return false;
+  try {
+    await fcmAdmin.messaging().send({
+      token,
+      data,
+      android: { priority: 'high' },
+    });
+    return true;
+  } catch (e) {
+    console.warn('⚠️ FCM send failed:', e.message);
+    return false;
+  }
+}
+
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -33,6 +63,7 @@ const memPendingKeyShares = new Map(); // groupId -> Map<recipientPubkey, { encr
 // Always in-memory (ephemeral connection state)
 const onlineUsers = new Map(); // pubkey -> socket.id
 const groupRooms = new Map(); // groupId -> Set<socket.id>
+const pendingCalls = new Map(); // targetPubkey -> { callId, callerPubkey, sdp, callerSocketId, expiresAt }
 
 // ========== STORAGE ABSTRACTION ==========
 // Each function checks db.isEnabled() and falls back to in-memory Maps
@@ -347,6 +378,18 @@ io.on('connection', (socket) => {
       socket.publicKey = publicKey;
       socket.emit('authenticated', { success: true });
       console.log('User authenticated:', publicKey);
+
+      // Deliver any buffered call that arrived while socket was reconnecting
+      const pending = pendingCalls.get(publicKey);
+      if (pending && Date.now() < pending.expiresAt) {
+        socket.emit('call_offer', {
+          callId: pending.callId,
+          callerPubkey: pending.callerPubkey,
+          sdp: pending.sdp,
+        });
+        pendingCalls.delete(publicKey);
+        console.log(`📞 Delivered buffered call ${pending.callId.slice(0, 8)}... to reconnected ${publicKey.slice(0, 8)}...`);
+      }
     } else {
       socket.emit('authenticated', { success: false, error: 'Invalid signature' });
     }
@@ -875,6 +918,18 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ========== FCM TOKEN REGISTRATION ==========
+
+  socket.on('register_fcm_token', async ({ token }) => {
+    if (!socket.publicKey || !token) return;
+    try {
+      await db.saveFcmToken(socket.publicKey, token);
+      console.log(`✅ FCM token saved for ${socket.publicKey.slice(0, 8)}...`);
+    } catch (e) {
+      console.warn('⚠️ Failed to save FCM token:', e.message);
+    }
+  });
+
   // ========== VOICE CALL SIGNALING (pure relay, no DB) ==========
 
   socket.on('call_offer', ({ callId, targetPubkey, sdp }) => {
@@ -888,8 +943,36 @@ io.on('connection', (socket) => {
       });
       console.log(`📞 Call offer ${callId.slice(0, 8)}... from ${socket.publicKey.slice(0, 8)}... to ${targetPubkey.slice(0, 8)}...`);
     } else {
-      socket.emit('call_busy', { callId, reason: 'offline' });
-      console.log(`📞 Call ${callId.slice(0, 8)}... target ${targetPubkey.slice(0, 8)}... is offline`);
+      // Buffer for 20s — Android reconnects in 1-3s; deliver on reconnect
+      const callerPubkey = socket.publicKey;
+      const callerSocketId = socket.id;
+      pendingCalls.set(targetPubkey, { callId, callerPubkey, sdp, callerSocketId, expiresAt: Date.now() + 20000 });
+      console.log(`📞 Call ${callId.slice(0, 8)}... buffered 20s for offline ${targetPubkey.slice(0, 8)}...`);
+
+      setTimeout(async () => {
+        const still = pendingCalls.get(targetPubkey);
+        if (still && still.callId === callId) {
+          pendingCalls.delete(targetPubkey);
+          // Notify caller only if still connected
+          const callerSocket = io.sockets.sockets.get(callerSocketId);
+          if (callerSocket) {
+            callerSocket.emit('call_busy', { callId, reason: 'offline' });
+          }
+          console.log(`📞 Call ${callId.slice(0, 8)}... expired — target never reconnected`);
+
+          // Try FCM as last resort (app fully closed)
+          const fcmToken = await db.getFcmToken(targetPubkey).catch(() => null);
+          if (fcmToken) {
+            await sendFcmNotification(fcmToken, {
+              type: 'incoming_call',
+              callId,
+              callerPubkey,
+              callerName: callerPubkey.slice(0, 8) + '...',
+            });
+            console.log(`📞 FCM call notification sent to ${targetPubkey.slice(0, 8)}...`);
+          }
+        }
+      }, 20000);
     }
   });
 

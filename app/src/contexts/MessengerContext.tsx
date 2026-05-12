@@ -93,7 +93,7 @@ import {
 } from '../utils/encryption';
 import type { WalletContextType } from './WalletContext';
 import { BACKEND_URL, SOLANA_RPC_URL } from '../config';
-import { initializeNotifications, sendMessageNotification } from '../utils/notifications';
+import { initializeNotifications, sendMessageNotification, setBadgeCount, setupFcm } from '../utils/notifications';
 import {
   getMXEPubKey,
   waitForComputation,
@@ -333,10 +333,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     persistGroupKeys();
   }, [groupKeys, wallet?.publicKey]);
 
-  // Persist unread counts to AsyncStorage (Feature 4)
+  // Persist unread counts + update app icon badge
   useEffect(() => {
     if (!wallet?.publicKey) return;
-    if (!hasLoadedPersistedKeys.current) return; // Use same guard
+    if (!hasLoadedPersistedKeys.current) return;
 
     const persistUnreadCounts = async () => {
       try {
@@ -351,6 +351,9 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     };
 
     persistUnreadCounts();
+
+    const total = Array.from(unreadCounts.values()).reduce((a, b) => a + b, 0);
+    setBadgeCount(total);
   }, [unreadCounts, wallet?.publicKey]);
 
   // Persist read timestamps to AsyncStorage (Fix 8)
@@ -870,6 +873,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     newSocket.on('authenticated', (data: any) => {
       if (data.success) {
         console.log('Authenticated with backend');
+        setupFcm(newSocket);
       } else {
         console.error('Authentication failed:', data.error);
         setConnectionStatus('disconnected');

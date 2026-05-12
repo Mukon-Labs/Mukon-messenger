@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useCallback, useRef, useEff
 import { Platform, PermissionsAndroid } from 'react-native';
 import { useMessenger } from './MessengerContext';
 import { WebRTCCall } from '../utils/webrtc';
+import { sendCallNotification } from '../utils/notifications';
 
 // Types
 export type CallStatus = 'idle' | 'calling' | 'ringing' | 'active' | 'ended' | 'unavailable' | 'declined';
@@ -308,6 +309,9 @@ export function CallProvider({ children }: { children: ReactNode }) {
         isMuted: false,
         isSpeakerOn: false,
       });
+
+      // Fire local notification so user sees call even if app is backgrounded
+      sendCallNotification(displayName, callerPubkey);
     };
 
     // Call answered by callee

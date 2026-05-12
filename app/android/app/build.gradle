@@ -199,3 +199,8 @@ if (rnVersion < versionToNumber(0, 75, 0)) {
     apply from: new File(["node", "--print", "require.resolve('@react-native-community/cli-platform-android/package.json', { paths: [require.resolve('react-native/package.json')] })"].execute(null, rootDir).text.trim(), "../native_modules.gradle");
     applyNativeModulesAppBuildGradle(project)
 }
+
+// Firebase — activated when google-services.json is present in android/app/
+if (file("google-services.json").exists()) {
+    apply plugin: 'com.google.gms.google-services'
+}
