@@ -120,8 +120,18 @@ export default function ContactsScreen({ navigation }: any) {
     if (lastMessage) {
       const isMe = lastMessage.sender === wallet.publicKey?.toBase58();
 
+      // Call history entries — show human-readable label instead of raw JSON
+      if (lastMessage.type === 'call') {
+        try {
+          const { callType } = JSON.parse(lastMessage.content || '{}');
+          lastMessageText = callType === 'missed' ? '📵 Missed call'
+            : callType === 'declined' ? '📵 Declined call'
+            : '📞 Call';
+        } catch {
+          lastMessageText = '📞 Call';
+        }
       // If it's our message OR it has plaintext content, use that
-      if (lastMessage.content) {
+      } else if (lastMessage.content) {
         lastMessageText = lastMessage.content;
       } else if (lastMessage.encrypted && lastMessage.nonce) {
         // Decrypt any encrypted message (both incoming and our own)
