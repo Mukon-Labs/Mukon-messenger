@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1014216844444",
+    "project_id": "mukon-messenger",
+    "storage_bucket": "mukon-messenger.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1014216844444:android:aabcd16a8e7946d5c53959",
+        "android_client_info": {
+          "package_name": "com.mukon.messenger"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCGSOd34o9NQd8rcx0KCZBycsNZk26z8ng"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

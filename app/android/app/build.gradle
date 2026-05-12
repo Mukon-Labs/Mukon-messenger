@@ -200,7 +200,4 @@ if (rnVersion < versionToNumber(0, 75, 0)) {
     applyNativeModulesAppBuildGradle(project)
 }
 
-// Firebase — activated when google-services.json is present in android/app/
-if (file("google-services.json").exists()) {
-    apply plugin: 'com.google.gms.google-services'
-}
+apply plugin: 'com.google.gms.google-services'
