@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, Modal, Animated } from 'react-native';
-import { Text, Button } from 'react-native-paper';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, StyleSheet, Modal, Animated, TouchableOpacity, Text, Platform } from 'react-native';
+import { Audio } from 'expo-av';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useCall, Contact } from '../contexts/CallContext';
 import AvatarDisplay from './AvatarDisplay';
+import { Contact } from '../contexts/CallContext';
 
 interface IncomingCallModalProps {
   visible: boolean;
@@ -14,8 +14,49 @@ interface IncomingCallModalProps {
 
 export default function IncomingCallModal({ visible, caller, onAccept, onDecline }: IncomingCallModalProps) {
   const [ringAnim] = useState(new Animated.Value(1));
+  const soundRef = useRef<Audio.Sound | null>(null);
 
+  // Looping ringtone — plays system default ringtone while modal is visible
   useEffect(() => {
+    if (!visible) return;
+
+    let mounted = true;
+    const startRingtone = async () => {
+      try {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: false,
+          playThroughEarpieceAndroid: false,
+        });
+        const uri = Platform.OS === 'android'
+          ? 'content://settings/system/ringtone'
+          : undefined;
+        if (!uri) return;
+        const { sound } = await Audio.Sound.createAsync(
+          { uri },
+          { shouldPlay: true, isLooping: true, volume: 1.0 }
+        );
+        if (!mounted) { sound.unloadAsync(); return; }
+        soundRef.current = sound;
+      } catch (e) {
+        console.warn('📞 Ringtone unavailable:', e);
+      }
+    };
+
+    startRingtone();
+
+    return () => {
+      mounted = false;
+      soundRef.current?.stopAsync().catch(() => {});
+      soundRef.current?.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    };
+  }, [visible]);
+
+  // Avatar pulse animation
+  useEffect(() => {
+    if (!visible) return;
     Animated.loop(
       Animated.sequence([
         Animated.timing(ringAnim, { toValue: 1.1, duration: 500, useNativeDriver: true }),
@@ -23,7 +64,7 @@ export default function IncomingCallModal({ visible, caller, onAccept, onDecline
       ])
     ).start();
     return () => ringAnim.stopAnimation();
-  }, []);
+  }, [visible]);
 
   if (!caller) return null;
 
@@ -39,23 +80,15 @@ export default function IncomingCallModal({ visible, caller, onAccept, onDecline
           <Text style={styles.callingText}>incoming call...</Text>
 
           <View style={styles.actions}>
-            <Button
-              mode="contained"
-              onPress={onDecline}
-              style={[styles.declineButton, { backgroundColor: '#EF4444' }]}
-              labelStyle={styles.buttonLabel}
-            >
-              <MaterialCommunityIcons name="phone-hangup" size={24} color="#fff" />
-            </Button>
+            <TouchableOpacity onPress={onDecline} style={[styles.callButton, styles.declineButton]}>
+              <MaterialCommunityIcons name="phone-hangup" size={30} color="#fff" />
+              <Text style={styles.buttonLabel}>Decline</Text>
+            </TouchableOpacity>
 
-            <Button
-              mode="contained"
-              onPress={onAccept}
-              style={[styles.acceptButton, { backgroundColor: '#22C55E' }]}
-              labelStyle={styles.buttonLabel}
-            >
-              <MaterialCommunityIcons name="phone" size={24} color="#fff" />
-            </Button>
+            <TouchableOpacity onPress={onAccept} style={[styles.callButton, styles.acceptButton]}>
+              <MaterialCommunityIcons name="phone" size={30} color="#fff" />
+              <Text style={styles.buttonLabel}>Accept</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </View>
@@ -91,21 +124,25 @@ const styles = StyleSheet.create({
   actions: {
     flexDirection: 'row',
     justifyContent: 'center',
-    gap: 40,
+    gap: 50,
+  },
+  callButton: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   declineButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    justifyContent: 'center',
+    backgroundColor: '#EF4444',
   },
   acceptButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    justifyContent: 'center',
+    backgroundColor: '#22C55E',
   },
   buttonLabel: {
-    margin: 0,
+    color: '#fff',
+    fontSize: 12,
+    marginTop: 4,
+    fontWeight: '600',
   },
 });

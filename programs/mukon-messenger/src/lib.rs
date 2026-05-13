@@ -27,7 +27,7 @@ pub const LIGHT_CPI_SIGNER: CpiSigner =
 
 const COMP_DEF_OFFSET_IS_MUTUAL_CONTACT: u32 = comp_def_offset("is_mutual_contact");
 const COMP_DEF_OFFSET_COUNT_ACCEPTED: u32 = comp_def_offset("count_accepted");
-const COMP_DEF_OFFSET_ADD_TWO_NUMBERS: u32 = comp_def_offset("add_two_numbers");
+const _COMP_DEF_OFFSET_ADD_TWO_NUMBERS: u32 = comp_def_offset("add_two_numbers");
 
 #[error_code]
 pub enum ErrorCode {
@@ -67,6 +67,14 @@ pub enum ErrorCode {
     InvalidSession,
     #[msg("Session expired")]
     SessionExpired,
+    #[msg("Invite already exists")]
+    InviteAlreadyExists,
+    #[msg("Not the invite recipient")]
+    NotInviteRecipient,
+    #[msg("Not the relationship initiator")]
+    NotRelationshipInitiator,
+    #[msg("Index owner mismatch")]
+    IndexOwnerMismatch,
 }
 
 // Deterministic hash function for chat PDAs
@@ -435,34 +443,39 @@ pub mod mukon_messenger {
     pub fn create_group(
         ctx: Context<CreateGroup>,
         group_id: [u8; 32],
-        name: String,
+        encrypted_name: Vec<u8>,
+        name_nonce: [u8; 24],
         encryption_pubkey: [u8; 32],
-        token_gate: Option<TokenGate>
+        token_gate: Option<TokenGate>,
+        encrypted_members: Vec<u8>,
+        members_nonce: [u8; 24],
     ) -> Result<()> {
         let authority = resolve_authority(
             &ctx.accounts.payer.key(),
             ctx.accounts.session_token.as_deref(),
         )?;
-        require!(name.len() <= 64, ErrorCode::GroupNameTooLong);
 
         let group = &mut ctx.accounts.group;
         group.group_id = group_id;
         group.creator = authority;
-        group.name = name.clone();
         group.created_at = Clock::get()?.unix_timestamp;
-        group.members = vec![authority];
+        group.member_count = 1;
         group.encryption_pubkey = encryption_pubkey;
         group.token_gate = token_gate;
+        group.encrypted_name = encrypted_name;
+        group.name_nonce = name_nonce;
+        group.encrypted_members = encrypted_members;
+        group.members_nonce = members_nonce;
 
-        msg!("Group created: id={:?}, name={}, creator={:?}",
-             group_id, name, authority);
+        msg!("Group created: id={:?}, creator={:?}", group_id, authority);
 
         Ok(())
     }
 
     pub fn update_group(
         ctx: Context<UpdateGroup>,
-        name: Option<String>,
+        encrypted_name: Option<Vec<u8>>,
+        name_nonce: Option<[u8; 24]>,
         token_gate: Option<TokenGate>
     ) -> Result<()> {
         let authority = resolve_authority(
@@ -471,12 +484,11 @@ pub mod mukon_messenger {
         )?;
         let group = &mut ctx.accounts.group;
 
-        // Only creator can update group
         require!(group.creator == authority, ErrorCode::NotGroupAdmin);
 
-        if let Some(new_name) = name {
-            require!(new_name.len() <= 64, ErrorCode::GroupNameTooLong);
-            group.name = new_name;
+        if let (Some(enc_name), Some(nonce)) = (encrypted_name, name_nonce) {
+            group.encrypted_name = enc_name;
+            group.name_nonce = nonce;
         }
 
         if let Some(new_gate) = token_gate {
@@ -495,19 +507,11 @@ pub mod mukon_messenger {
         )?;
         let group = &ctx.accounts.group;
 
-        // Any member can invite (creator can kick bad actors)
-        require!(group.members.contains(&authority), ErrorCode::NotGroupMember);
+        // Only creator can invite (member list is encrypted — post-MVP: any member via GroupKeyShare)
+        require!(group.creator == authority, ErrorCode::NotGroupAdmin);
 
-        // Check if group is full
-        require!(group.members.len() < 30, ErrorCode::GroupFull);
+        require!(group.member_count < 30, ErrorCode::GroupFull);
 
-        // Check if already a member or invited
-        require!(
-            !group.members.contains(&ctx.accounts.invitee.key()),
-            ErrorCode::AlreadyInvited
-        );
-
-        // Create or update invite
         let invite = &mut ctx.accounts.group_invite;
         invite.group_id = group.group_id;
         invite.inviter = authority;
@@ -557,13 +561,10 @@ pub mod mukon_messenger {
             require!(token_account.amount >= gate.min_balance, ErrorCode::InsufficientTokenBalance);
         }
 
-        // Check if group is full
-        require!(group.members.len() < 30, ErrorCode::GroupFull);
+        require!(group.member_count < 30, ErrorCode::GroupFull);
 
-        // Add to group
-        group.members.push(authority);
+        group.member_count += 1;
 
-        // Update invite status
         invite.status = GroupInviteStatus::Accepted;
 
         msg!("Group invite accepted: group={:?}, member={:?}",
@@ -608,17 +609,12 @@ pub mod mukon_messenger {
         )?;
         let group = &mut ctx.accounts.group;
 
-        // Cannot leave if you're the creator
         require!(group.creator != authority, ErrorCode::CannotRemoveCreator);
+        require!(group.member_count > 0, ErrorCode::NotGroupMember);
 
-        // Verify member is in group
-        require!(group.members.contains(&authority), ErrorCode::NotGroupMember);
+        group.member_count -= 1;
 
-        // Remove from members
-        group.members.retain(|m| m != &authority);
-
-        msg!("Left group: group={:?}, member={:?}",
-             group.group_id, authority);
+        msg!("Left group: group={:?}, member={:?}", group.group_id, authority);
 
         Ok(())
     }
@@ -630,23 +626,11 @@ pub mod mukon_messenger {
         )?;
         let group = &mut ctx.accounts.group;
 
-        // Only creator can kick (admin-only for MVP)
         require!(group.creator == authority, ErrorCode::NotGroupAdmin);
+        require!(ctx.accounts.member.key() != group.creator, ErrorCode::CannotRemoveCreator);
+        require!(group.member_count > 0, ErrorCode::NotGroupMember);
 
-        // Cannot kick the creator
-        require!(
-            ctx.accounts.member.key() != group.creator,
-            ErrorCode::CannotRemoveCreator
-        );
-
-        // Verify member is in group
-        require!(
-            group.members.contains(&ctx.accounts.member.key()),
-            ErrorCode::NotGroupMember
-        );
-
-        // Remove from members
-        group.members.retain(|m| m != &ctx.accounts.member.key());
+        group.member_count -= 1;
 
         msg!("Kicked from group: group={:?}, member={:?}",
              group.group_id, ctx.accounts.member.key());
@@ -690,9 +674,6 @@ pub mod mukon_messenger {
 
         let key_share = &mut ctx.accounts.group_key_share;
         let group = &ctx.accounts.group;
-
-        // Verify resolved authority is a member of the group
-        require!(group.members.contains(&authority), ErrorCode::NotGroupMember);
 
         // Store the encrypted key share
         key_share.group_id = group.group_id;
@@ -786,14 +767,6 @@ pub mod mukon_messenger {
         encrypted_key: [u8; 48],
         nonce: [u8; 24],
     ) -> Result<()> {
-        let group = &ctx.accounts.group;
-
-        // Verify signer is a member of the group
-        require!(
-            group.members.contains(&ctx.accounts.signer.key()),
-            ErrorCode::NotGroupMember
-        );
-
         // Set up CPI accounts
         let light_cpi_accounts = CpiAccounts::new(
             ctx.accounts.signer.as_ref(),
@@ -895,20 +868,10 @@ pub mod mukon_messenger {
     ) -> Result<()> {
         let group = &ctx.accounts.group;
 
-        // Any member can invite (creator can kick bad actors)
-        require!(
-            group.members.contains(&ctx.accounts.signer.key()),
-            ErrorCode::NotGroupMember
-        );
+        // Only creator can invite (member list is encrypted)
+        require!(group.creator == ctx.accounts.signer.key(), ErrorCode::NotGroupAdmin);
 
-        // Check if group is full
-        require!(group.members.len() < 30, ErrorCode::GroupFull);
-
-        // Check if already a member
-        require!(
-            !group.members.contains(&ctx.accounts.invitee.key()),
-            ErrorCode::AlreadyInvited
-        );
+        require!(group.member_count < 30, ErrorCode::GroupFull);
 
         // Set up CPI accounts
         let light_cpi_accounts = CpiAccounts::new(
@@ -1012,8 +975,7 @@ pub mod mukon_messenger {
             );
         }
 
-        // Add to group
-        group.members.push(ctx.accounts.signer.key());
+        group.member_count += 1;
 
         // Update compressed invite status to Accepted
         let mut invite = LightAccount::<CompressedGroupInvite>::new_mut(
@@ -1269,6 +1231,199 @@ pub mod mukon_messenger {
         msg!("count_accepted computation completed");
         Ok(())
     }
+
+    // ========== PRIVATE SOCIAL GRAPH INSTRUCTIONS ==========
+
+    pub fn create_contact_index(ctx: Context<CreateContactIndex>) -> Result<()> {
+        let index = &mut ctx.accounts.contact_index;
+        index.owner = ctx.accounts.payer.key();
+        index.encrypted_entries = vec![];
+        index.nonce = [0u8; 24];
+        msg!("ContactIndex created: owner={:?}", index.owner);
+        Ok(())
+    }
+
+    pub fn update_contact_index(
+        ctx: Context<UpdateContactIndex>,
+        encrypted_entries: Vec<u8>,
+        nonce: [u8; 24],
+    ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+        let index = &mut ctx.accounts.contact_index;
+        require!(index.owner == authority, ErrorCode::IndexOwnerMismatch);
+        index.encrypted_entries = encrypted_entries;
+        index.nonce = nonce;
+        Ok(())
+    }
+
+    pub fn create_group_index(ctx: Context<CreateGroupIndex>) -> Result<()> {
+        let index = &mut ctx.accounts.group_index;
+        index.owner = ctx.accounts.payer.key();
+        index.encrypted_entries = vec![];
+        index.nonce = [0u8; 24];
+        msg!("GroupIndex created: owner={:?}", index.owner);
+        Ok(())
+    }
+
+    pub fn update_group_index(
+        ctx: Context<UpdateGroupIndex>,
+        encrypted_entries: Vec<u8>,
+        nonce: [u8; 24],
+    ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+        let index = &mut ctx.accounts.group_index;
+        require!(index.owner == authority, ErrorCode::IndexOwnerMismatch);
+        index.encrypted_entries = encrypted_entries;
+        index.nonce = nonce;
+        Ok(())
+    }
+
+    /// Creates a PrivateRelationship + InvitePointer atomically.
+    /// Initiator's status set to Accepted (3), recipient's to Invited (1).
+    pub fn create_private_invite(
+        ctx: Context<CreatePrivateInvite>,
+        random_id: [u8; 32],
+        encrypted_data: Vec<u8>,
+        data_nonce: [u8; 24],
+        encrypted_sender: Vec<u8>,
+        sender_nonce: [u8; 24],
+    ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+
+        let rel = &mut ctx.accounts.private_relationship;
+        rel.random_id = random_id;
+        rel.status_a = 3; // Accepted — initiator always starts accepted
+        rel.status_b = 1; // Invited — recipient hasn't responded
+        rel.created_at = Clock::get()?.unix_timestamp;
+        rel.initiator = authority;
+        rel.encrypted_data = encrypted_data;
+        rel.data_nonce = data_nonce;
+
+        let ptr = &mut ctx.accounts.invite_pointer;
+        ptr.recipient = ctx.accounts.recipient.key();
+        ptr.random_id = random_id;
+        ptr.encrypted_sender = encrypted_sender;
+        ptr.sender_nonce = sender_nonce;
+        ptr.created_at = Clock::get()?.unix_timestamp;
+
+        msg!("Private invite created: random_id={:?}", random_id);
+        Ok(())
+    }
+
+    /// Accept a private invite. Sets status_b = 3. Closes InvitePointer (returns rent).
+    pub fn accept_private_invite(ctx: Context<AcceptPrivateInvite>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+        require!(
+            ctx.accounts.invite_pointer.recipient == authority,
+            ErrorCode::NotInviteRecipient
+        );
+        ctx.accounts.private_relationship.status_b = 3; // Accepted
+        msg!("Private invite accepted: random_id={:?}", ctx.accounts.private_relationship.random_id);
+        Ok(())
+    }
+
+    /// Reject a private invite. Sets status_b = 4. Closes InvitePointer (returns rent).
+    pub fn reject_private_invite(ctx: Context<RejectPrivateInvite>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+        require!(
+            ctx.accounts.invite_pointer.recipient == authority,
+            ErrorCode::NotInviteRecipient
+        );
+        ctx.accounts.private_relationship.status_b = 4; // Rejected
+        msg!("Private invite rejected: random_id={:?}", ctx.accounts.private_relationship.random_id);
+        Ok(())
+    }
+
+    /// Update one side's status (block = 5, unblock = 3).
+    /// side: 0 = initiator (status_a), 1 = recipient (status_b).
+    /// Auth for side 1: knowledge of random_id (non-initiator with account access).
+    pub fn update_relationship_status(
+        ctx: Context<UpdateRelationshipStatus>,
+        side: u8,
+        new_status: u8,
+    ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+        let rel = &mut ctx.accounts.private_relationship;
+        match side {
+            0 => {
+                require!(rel.initiator == authority, ErrorCode::NotRelationshipInitiator);
+                rel.status_a = new_status;
+            }
+            1 => {
+                // Recipient: must not be the initiator (knowledge of random_id = proof of being the other party)
+                require!(rel.initiator != authority, ErrorCode::Unauthorized);
+                rel.status_b = new_status;
+            }
+            _ => return Err(ErrorCode::Unauthorized.into()),
+        }
+        msg!("Relationship status updated: side={}, status={}", side, new_status);
+        Ok(())
+    }
+
+    /// Close a PrivateRelationship and reclaim rent.
+    /// Auth: initiator can always delete; either party can delete if statuses are terminal.
+    pub fn delete_private_relationship(ctx: Context<DeletePrivateRelationship>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+        let rel = &ctx.accounts.private_relationship;
+        let is_terminal = matches!(rel.status_a, 4 | 5) && matches!(rel.status_b, 4 | 5);
+        require!(
+            rel.initiator == authority || is_terminal,
+            ErrorCode::NotRelationshipInitiator
+        );
+        msg!("Private relationship deleted: random_id={:?}", rel.random_id);
+        Ok(())
+    }
+
+    /// Admin-only: update the encrypted members display blob on the group account.
+    pub fn update_group_members_list(
+        ctx: Context<UpdateGroupMembersList>,
+        encrypted_members: Vec<u8>,
+        members_nonce: [u8; 24],
+    ) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+        let group = &mut ctx.accounts.group;
+        require!(group.creator == authority, ErrorCode::NotGroupAdmin);
+        group.encrypted_members = encrypted_members;
+        group.members_nonce = members_nonce;
+        msg!("Group members list updated: id={:?}", group.group_id);
+        Ok(())
+    }
+
+    /// Close a legacy Relationship PDA and reclaim rent (migration helper).
+    pub fn close_old_relationship(ctx: Context<CloseOldRelationship>) -> Result<()> {
+        let authority = resolve_authority(
+            &ctx.accounts.payer.key(),
+            ctx.accounts.session_token.as_deref(),
+        )?;
+        let rel = &ctx.accounts.relationship;
+        require!(rel.user_a == authority || rel.user_b == authority, ErrorCode::Unauthorized);
+        msg!("Old relationship closed: user_a={:?}", rel.user_a);
+        Ok(())
+    }
 }
 
 // ========== ACCOUNT STRUCTURES ==========
@@ -1281,6 +1436,10 @@ const GROUP_INVITE_VERSION: [u8; 1] = [1];
 const GROUP_KEY_SHARE_VERSION: [u8; 1] = [1];
 const RELATIONSHIP_VERSION: [u8; 1] = [1];
 const SESSION_TOKEN_VERSION: [u8; 1] = [1];
+const PRIVATE_RELATIONSHIP_VERSION: [u8; 1] = [1];
+const CONTACT_INDEX_VERSION: [u8; 1] = [1];
+const INVITE_POINTER_VERSION: [u8; 1] = [1];
+const GROUP_INDEX_VERSION: [u8; 1] = [1];
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
 pub enum PeerState {
@@ -1341,11 +1500,14 @@ pub struct Conversation {
 pub struct Group {
     pub group_id: [u8; 32],
     pub creator: Pubkey,
-    pub name: String,
     pub created_at: i64,
-    pub members: Vec<Pubkey>,
+    pub member_count: u32,              // plaintext — enforces 30-member limit
     pub encryption_pubkey: [u8; 32],
     pub token_gate: Option<TokenGate>,
+    pub encrypted_name: Vec<u8>,        // nacl.secretbox(name, group_secret)
+    pub name_nonce: [u8; 24],
+    pub encrypted_members: Vec<u8>,     // nacl.secretbox(Vec<Pubkey>, group_secret)
+    pub members_nonce: [u8; 24],
 }
 
 #[account]
@@ -1386,6 +1548,52 @@ pub struct SessionToken {
     pub valid_until: i64,      // expiration timestamp
 }
 // Space: 8 + 32 + 32 + 8 = 80 bytes
+
+// ========== PRIVATE SOCIAL GRAPH STRUCTURES ==========
+
+/// Private DM relationship PDA — seeds: ["priv_rel", random_id]
+/// Fixed-length fields placed before Vec so status bytes land at known offsets for Arcium:
+///   offset 8  = random_id [u8;32]
+///   offset 40 = status_a  ← Arcium is_mutual_contact reads here
+///   offset 41 = status_b
+#[account]
+pub struct PrivateRelationship {
+    pub random_id: [u8; 32],
+    pub status_a: u8,
+    pub status_b: u8,
+    pub created_at: i64,
+    pub initiator: Pubkey,
+    pub encrypted_data: Vec<u8>,  // nacl.secretbox({ user_a: Pubkey, user_b: Pubkey })
+    pub data_nonce: [u8; 24],
+}
+
+/// Per-user encrypted contact list index — seeds: ["contact_index", owner]
+#[account]
+pub struct ContactIndex {
+    pub owner: Pubkey,
+    pub encrypted_entries: Vec<u8>,  // nacl.secretbox(Vec<{ random_id, counterparty }>)
+    pub nonce: [u8; 24],
+}
+
+/// On-chain invite delivery pointer — seeds: ["invite_ptr", recipient, random_id]
+/// Closed on accept/reject (returns rent to recipient).
+/// Reveals: recipient has N pending invites. Sender identity encrypted.
+#[account]
+pub struct InvitePointer {
+    pub recipient: Pubkey,
+    pub random_id: [u8; 32],
+    pub encrypted_sender: Vec<u8>,  // nacl.box(sender_pubkey, recipient_nacl_pubkey)
+    pub sender_nonce: [u8; 24],
+    pub created_at: i64,
+}
+
+/// Per-user encrypted group list index — seeds: ["group_index", owner]
+#[account]
+pub struct GroupIndex {
+    pub owner: Pubkey,
+    pub encrypted_entries: Vec<u8>,  // nacl.secretbox(Vec<group_id: [u8;32]>)
+    pub nonce: [u8; 24],
+}
 
 // ========== COMPRESSED ACCOUNT STRUCTURES (Light Protocol ZK Compression) ==========
 
@@ -1656,12 +1864,14 @@ pub struct CloseRelationship<'info> {
 // ========== GROUP CONTEXT STRUCTURES ==========
 
 #[derive(Accounts)]
-#[instruction(group_id: [u8; 32], name: String, encryption_pubkey: [u8; 32], token_gate: Option<TokenGate>)]
+#[instruction(group_id: [u8; 32], encrypted_name: Vec<u8>, name_nonce: [u8; 24], encryption_pubkey: [u8; 32], token_gate: Option<TokenGate>, encrypted_members: Vec<u8>, members_nonce: [u8; 24])]
 pub struct CreateGroup<'info> {
     #[account(
         init,
         payer = payer,
-        space = 8 + 32 + 32 + (4 + 64) + 8 + (4 + 30 * 32) + 32 + (1 + 32 + 8),
+        // disc + group_id + creator + created_at + member_count + enc_pubkey + token_gate
+        // + encrypted_name (max 96 bytes) + name_nonce + encrypted_members (max 1008 bytes) + members_nonce
+        space = 8 + 32 + 32 + 8 + 4 + 32 + (1 + 32 + 8) + (4 + 96) + 24 + (4 + 1008) + 24,
         seeds = [b"group", group_id.as_ref(), GROUP_VERSION.as_ref()],
         bump
     )]
@@ -1715,10 +1925,7 @@ pub struct AcceptGroupInvite<'info> {
     #[account(
         mut,
         seeds = [b"group", group.group_id.as_ref(), GROUP_VERSION.as_ref()],
-        bump,
-        realloc = 8 + 32 + 32 + (4 + 64) + 8 + (4 + (group.members.len() + 1) * 32) + 32 + (1 + 32 + 8),
-        realloc::payer = payer,
-        realloc::zero = false
+        bump
     )]
     pub group: Account<'info, Group>,
     #[account(
@@ -1757,10 +1964,7 @@ pub struct LeaveGroup<'info> {
     #[account(
         mut,
         seeds = [b"group", group.group_id.as_ref(), GROUP_VERSION.as_ref()],
-        bump,
-        realloc = 8 + 32 + 32 + (4 + 64) + 8 + (4 + (group.members.len().saturating_sub(1)) * 32) + 32 + (1 + 32 + 8),
-        realloc::payer = payer,
-        realloc::zero = false
+        bump
     )]
     pub group: Account<'info, Group>,
     #[account(mut)]
@@ -1774,10 +1978,7 @@ pub struct KickMember<'info> {
     #[account(
         mut,
         seeds = [b"group", group.group_id.as_ref(), GROUP_VERSION.as_ref()],
-        bump,
-        realloc = 8 + 32 + 32 + (4 + 64) + 8 + (4 + (group.members.len().saturating_sub(1)) * 32) + 32 + (1 + 32 + 8),
-        realloc::payer = payer,
-        realloc::zero = false
+        bump
     )]
     pub group: Account<'info, Group>,
     /// CHECK: member to kick
@@ -1909,16 +2110,12 @@ pub struct InviteToGroupCompressed<'info> {
 }
 
 /// Context for accepting compressed group invite
-/// Note: Group account modified to add member
 #[derive(Accounts)]
 pub struct AcceptGroupInviteCompressed<'info> {
     #[account(
         mut,
         seeds = [b"group", group.group_id.as_ref(), GROUP_VERSION.as_ref()],
-        bump,
-        realloc = 8 + 32 + 32 + (4 + 64) + 8 + (4 + (group.members.len() + 1) * 32) + 32 + (1 + 32 + 8),
-        realloc::payer = signer,
-        realloc::zero = false
+        bump
     )]
     pub group: Account<'info, Group>,
     pub user_token_account: Option<Account<'info, TokenAccount>>,
@@ -2100,6 +2297,212 @@ pub struct CountAcceptedCallback<'info> {
     /// CHECK: instructions sysvar
     #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
+}
+
+// ========== PRIVATE SOCIAL GRAPH CONTEXT STRUCTURES ==========
+
+#[derive(Accounts)]
+pub struct CreateContactIndex<'info> {
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + 32 + (4 + 0) + 24,  // empty on creation; grows via update_contact_index
+        seeds = [b"contact_index", payer.key().as_ref(), CONTACT_INDEX_VERSION.as_ref()],
+        bump
+    )]
+    pub contact_index: Account<'info, ContactIndex>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(encrypted_entries: Vec<u8>, nonce: [u8; 24])]
+pub struct UpdateContactIndex<'info> {
+    #[account(
+        mut,
+        seeds = [b"contact_index", authority.key().as_ref(), CONTACT_INDEX_VERSION.as_ref()],
+        bump,
+        realloc = 8 + 32 + (4 + encrypted_entries.len()) + 24,
+        realloc::payer = payer,
+        realloc::zero = false
+    )]
+    pub contact_index: Account<'info, ContactIndex>,
+    /// CHECK: Wallet pubkey for PDA derivation; may differ from payer when using sessions.
+    pub authority: AccountInfo<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct CreateGroupIndex<'info> {
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + 32 + (4 + 0) + 24,  // empty on creation; grows via update_group_index
+        seeds = [b"group_index", payer.key().as_ref(), GROUP_INDEX_VERSION.as_ref()],
+        bump
+    )]
+    pub group_index: Account<'info, GroupIndex>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(encrypted_entries: Vec<u8>, nonce: [u8; 24])]
+pub struct UpdateGroupIndex<'info> {
+    #[account(
+        mut,
+        seeds = [b"group_index", authority.key().as_ref(), GROUP_INDEX_VERSION.as_ref()],
+        bump,
+        realloc = 8 + 32 + (4 + encrypted_entries.len()) + 24,
+        realloc::payer = payer,
+        realloc::zero = false
+    )]
+    pub group_index: Account<'info, GroupIndex>,
+    /// CHECK: Wallet pubkey for PDA derivation; may differ from payer when using sessions.
+    pub authority: AccountInfo<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(random_id: [u8; 32], encrypted_data: Vec<u8>, data_nonce: [u8; 24], encrypted_sender: Vec<u8>, sender_nonce: [u8; 24])]
+pub struct CreatePrivateInvite<'info> {
+    // space: disc + random_id + status_a + status_b + created_at + initiator + enc_data + data_nonce
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + 32 + 1 + 1 + 8 + 32 + (4 + encrypted_data.len()) + 24,
+        seeds = [b"priv_rel", random_id.as_ref(), PRIVATE_RELATIONSHIP_VERSION.as_ref()],
+        bump
+    )]
+    pub private_relationship: Account<'info, PrivateRelationship>,
+    // space: disc + recipient + random_id + enc_sender + sender_nonce + created_at
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + 32 + 32 + (4 + encrypted_sender.len()) + 24 + 8,
+        seeds = [b"invite_ptr", recipient.key().as_ref(), random_id.as_ref(), INVITE_POINTER_VERSION.as_ref()],
+        bump
+    )]
+    pub invite_pointer: Account<'info, InvitePointer>,
+    /// CHECK: recipient is a public key
+    pub recipient: AccountInfo<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct AcceptPrivateInvite<'info> {
+    #[account(
+        mut,
+        seeds = [b"priv_rel", private_relationship.random_id.as_ref(), PRIVATE_RELATIONSHIP_VERSION.as_ref()],
+        bump
+    )]
+    pub private_relationship: Account<'info, PrivateRelationship>,
+    #[account(
+        mut,
+        close = payer,
+        seeds = [b"invite_ptr", invite_pointer.recipient.as_ref(), invite_pointer.random_id.as_ref(), INVITE_POINTER_VERSION.as_ref()],
+        bump,
+        constraint = invite_pointer.random_id == private_relationship.random_id @ ErrorCode::Unauthorized
+    )]
+    pub invite_pointer: Account<'info, InvitePointer>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct RejectPrivateInvite<'info> {
+    #[account(
+        mut,
+        seeds = [b"priv_rel", private_relationship.random_id.as_ref(), PRIVATE_RELATIONSHIP_VERSION.as_ref()],
+        bump
+    )]
+    pub private_relationship: Account<'info, PrivateRelationship>,
+    #[account(
+        mut,
+        close = payer,
+        seeds = [b"invite_ptr", invite_pointer.recipient.as_ref(), invite_pointer.random_id.as_ref(), INVITE_POINTER_VERSION.as_ref()],
+        bump,
+        constraint = invite_pointer.random_id == private_relationship.random_id @ ErrorCode::Unauthorized
+    )]
+    pub invite_pointer: Account<'info, InvitePointer>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateRelationshipStatus<'info> {
+    #[account(
+        mut,
+        seeds = [b"priv_rel", private_relationship.random_id.as_ref(), PRIVATE_RELATIONSHIP_VERSION.as_ref()],
+        bump
+    )]
+    pub private_relationship: Account<'info, PrivateRelationship>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
+}
+
+#[derive(Accounts)]
+pub struct DeletePrivateRelationship<'info> {
+    #[account(
+        mut,
+        close = payer,
+        seeds = [b"priv_rel", private_relationship.random_id.as_ref(), PRIVATE_RELATIONSHIP_VERSION.as_ref()],
+        bump
+    )]
+    pub private_relationship: Account<'info, PrivateRelationship>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(encrypted_members: Vec<u8>, members_nonce: [u8; 24])]
+pub struct UpdateGroupMembersList<'info> {
+    #[account(
+        mut,
+        seeds = [b"group", group.group_id.as_ref(), GROUP_VERSION.as_ref()],
+        bump,
+        realloc = 8 + 32 + 32 + 8 + 4 + 32 + (1 + 32 + 8) + (4 + group.encrypted_name.len()) + 24 + (4 + encrypted_members.len()) + 24,
+        realloc::payer = payer,
+        realloc::zero = false
+    )]
+    pub group: Account<'info, Group>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct CloseOldRelationship<'info> {
+    #[account(
+        mut,
+        close = payer,
+        seeds = [b"relationship", relationship.user_a.as_ref(), relationship.user_b.as_ref(), RELATIONSHIP_VERSION.as_ref()],
+        bump
+    )]
+    pub relationship: Account<'info, Relationship>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub session_token: Option<Account<'info, SessionToken>>,
+    pub system_program: Program<'info, System>,
 }
 
 // ========== ARCIUM MPC EVENTS ==========

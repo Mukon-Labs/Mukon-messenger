@@ -13,6 +13,10 @@ import {
   getGroupInvitePDA,
   getGroupKeySharePDA,
   getSessionTokenPDA,
+  getContactIndexPDA,
+  getGroupIndexPDA,
+  getPrivateRelationshipPDA,
+  getInvitePointerPDA,
   createRegisterInstruction,
   createUpdateProfileInstruction,
   createCloseProfileInstruction,
@@ -34,6 +38,16 @@ import {
   createStoreGroupKeyForMemberInstruction,
   createCloseGroupKeyInstruction,
   createCreateSessionInstruction,
+  createCreateContactIndexInstruction,
+  createUpdateContactIndexInstruction,
+  createCreateGroupIndexInstruction,
+  createUpdateGroupIndexInstruction,
+  createCreatePrivateInviteInstruction,
+  createAcceptPrivateInviteInstruction,
+  createRejectPrivateInviteInstruction,
+  createUpdateRelationshipStatusInstruction,
+  createDeletePrivateRelationshipInstruction,
+  createUpdateGroupMembersListInstruction,
   // Arcium MPC instructions
   createCheckMutualContactInstruction,
   createCountAcceptedContactsInstruction,
@@ -50,6 +64,10 @@ import {
   deserializeGroup,
   deserializeGroupInvite,
   deserializeGroupKeyShare,
+  deserializeContactIndex,
+  deserializeGroupIndex,
+  deserializePrivateRelationship,
+  deserializeInvitePointer,
   PROGRAM_ID,
   type Group,
   type GroupInvite,
@@ -57,15 +75,31 @@ import {
   type TokenGate,
   type SessionInfo,
 } from '../utils/transactions';
-import { deriveEncryptionKeypair, getChatHash } from '../utils/encryption';
+import {
+  deriveEncryptionKeypair,
+  getChatHash,
+  deriveRelationshipKey,
+  encryptRelationshipData,
+  encryptContactIndexEntries,
+  decryptContactIndexEntries,
+  encryptGroupIndexEntries,
+  decryptGroupIndexEntries,
+  encryptSenderForRecipient,
+  decryptSenderFromRecipient,
+  encryptGroupName,
+  encryptGroupMembers,
+  decryptGroupMembers,
+  decryptGroupName,
+} from '../utils/encryption';
 import type { WalletContextType } from './WalletContext';
 import { BACKEND_URL, SOLANA_RPC_URL } from '../config';
-import { initializeNotifications, sendMessageNotification } from '../utils/notifications';
+import { initializeNotifications, sendMessageNotification, setBadgeCount, setupFcm } from '../utils/notifications';
 import {
   getMXEPubKey,
   waitForComputation,
   ARCIUM_CLUSTER_OFFSET,
   generateEphemeralKeys,
+  decryptResult,
 } from '../utils/arcium';
 
 // ============================================================================
@@ -109,6 +143,8 @@ export interface Contact {
   encryptionPublicKey?: Uint8Array;
   state: 'Invited' | 'Requested' | 'Accepted' | 'Rejected' | 'Blocked';
   avatarUrl?: string;
+  randomId?: Uint8Array;   // PrivateRelationship random_id — needed for block/delete/accept
+  isInitiator?: boolean;   // true if we created the invite (determines which status side we own)
 }
 
 interface Profile {
@@ -245,6 +281,19 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     contactsRef.current = contacts;
   }, [contacts]);
 
+  // Proactively join conversation rooms for all accepted contacts so messages
+  // arrive in real-time even before the user opens a specific chat.
+  useEffect(() => {
+    if (!socket || !wallet?.publicKey) return;
+    contacts
+      .filter(c => c.state === 'Accepted')
+      .forEach(c => {
+        const chatHash = getChatHash(wallet.publicKey!, c.publicKey);
+        const conversationId = Buffer.from(chatHash).toString('hex');
+        socket.emit('join_conversation', { conversationId });
+      });
+  }, [contacts, socket, wallet?.publicKey]);
+
   useEffect(() => {
     groupKeysRef.current = groupKeys;
   }, [groupKeys]);
@@ -284,10 +333,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     persistGroupKeys();
   }, [groupKeys, wallet?.publicKey]);
 
-  // Persist unread counts to AsyncStorage (Feature 4)
+  // Persist unread counts + update app icon badge
   useEffect(() => {
     if (!wallet?.publicKey) return;
-    if (!hasLoadedPersistedKeys.current) return; // Use same guard
+    if (!hasLoadedPersistedKeys.current) return;
 
     const persistUnreadCounts = async () => {
       try {
@@ -302,6 +351,9 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     };
 
     persistUnreadCounts();
+
+    const total = Array.from(unreadCounts.values()).reduce((a, b) => a + b, 0);
+    setBadgeCount(total);
   }, [unreadCounts, wallet?.publicKey]);
 
   // Persist read timestamps to AsyncStorage (Fix 8)
@@ -663,8 +715,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
               const creatorAccount = await connection.getAccountInfo(creatorProfilePDA);
               if (creatorAccount) {
                 const data = creatorAccount.data;
-                senderEncPubkey = parseEncryptionPubkey(data) ?? undefined;
-                if (senderEncPubkey) console.log(`🔑 Using admin's encryption key for decryption`);
+                senderEncPubkey = parseEncryptionPubkey(data) ?? encryptionKeys.publicKey;
+                console.log(`🔑 Using admin's encryption key for decryption`);
               }
             } catch (fetchErr) {
               console.error('Failed to fetch admin encryption key:', fetchErr);
@@ -821,6 +873,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     newSocket.on('authenticated', (data: any) => {
       if (data.success) {
         console.log('Authenticated with backend');
+        setupFcm(newSocket);
       } else {
         console.error('Authentication failed:', data.error);
         setConnectionStatus('disconnected');
@@ -1082,8 +1135,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
             const keyShares: Array<{ recipientPubkey: string; encryptedKey: string; nonce: string }> = [];
             const updatedGroups = groupsRef.current;
             const updatedGroup = updatedGroups.find(g => Buffer.from(g.groupId).toString('hex') === groupId);
+            // Decrypt member list using OLD group secret (pre-rotation, still valid for reading)
+            const oldGroupSecret = groupKeysRef.current.get(groupId);
+            const remainingMembers = (updatedGroup && oldGroupSecret)
+              ? (decryptGroupMembers(updatedGroup.encryptedMembers, updatedGroup.membersNonce, oldGroupSecret) ?? [])
+              : [];
             if (updatedGroup) {
-              for (const member of updatedGroup.members) {
+              for (const member of remainingMembers) {
                 if (member.equals(wallet.publicKey!)) continue;
                 try {
                   let memberEncPubkey: Uint8Array | undefined = contactsRef.current.find(
@@ -1130,6 +1188,16 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     newSocket.on('invitation_rejected', ({ rejectorPubkey, peerPubkey }) => {
       console.log('🚫 Invitation rejected by:', rejectorPubkey);
       // Reload contacts to update UI (will filter out Rejected contacts)
+      loadContacts();
+    });
+
+    newSocket.on('contact_invite_received', ({ senderPubkey }) => {
+      console.log('📨 New contact invite from:', senderPubkey);
+      loadContacts();
+    });
+
+    newSocket.on('contact_accepted_received', ({ acceptorPubkey }) => {
+      console.log('✅ Contact accepted by:', acceptorPubkey);
       loadContacts();
     });
 
@@ -1408,6 +1476,24 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       if (accountInfo) {
         console.log('User already registered');
+        // Ensure indexes exist for users registered before private social graph upgrade
+        if (encryptionKeys) {
+          const session = sessionInfoRef.current || undefined;
+          const contactIndexPDA = getContactIndexPDA(wallet.publicKey);
+          const groupIndexPDA = getGroupIndexPDA(wallet.publicKey);
+          const [ciAccount, giAccount] = await Promise.all([
+            connection.getAccountInfo(contactIndexPDA),
+            connection.getAccountInfo(groupIndexPDA),
+          ]);
+          const missing: ReturnType<typeof createCreateContactIndexInstruction>[] = [];
+          if (!ciAccount) missing.push(createCreateContactIndexInstruction(wallet.publicKey));
+          if (!giAccount) missing.push(createCreateGroupIndexInstruction(wallet.publicKey));
+          if (missing.length > 0) {
+            console.log(`⚠️ Creating missing indexes (${missing.length})...`);
+            await signAndSendTransaction(missing);
+            console.log('✅ Indexes created for existing user');
+          }
+        }
         return null;
       }
 
@@ -1421,13 +1507,20 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       const validUntil = Math.floor(Date.now() / 1000) + 7 * 24 * 3600; // 7 days
       const SESSION_FUND_LAMPORTS = Math.floor(0.05 * LAMPORTS_PER_SOL);
 
-      console.log('Creating register + session instructions for:', displayName);
+      console.log('Creating register + indexes + session instructions for:', displayName);
       const registerIx = createRegisterInstruction(
         wallet.publicKey,
         displayName,
         avatarData,
         encryptionKeys.publicKey
       );
+
+      // Check which index PDAs already exist (survive close_profile)
+      const [existingCI, existingGI] = await Promise.all([
+        connection.getAccountInfo(getContactIndexPDA(wallet.publicKey)),
+        connection.getAccountInfo(getGroupIndexPDA(wallet.publicKey)),
+      ]);
+
       const createSessionIx = createCreateSessionInstruction(
         wallet.publicKey,
         newSessionKeypair.publicKey,
@@ -1439,9 +1532,14 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         lamports: SESSION_FUND_LAMPORTS,
       });
 
-      // ONE transaction, ONE wallet popup: register + create session + fund session
-      console.log('Building transaction (register + session + fund)...');
-      const transaction = await buildTransaction(connection, wallet.publicKey, [registerIx, createSessionIx, fundSessionIx]);
+      const ixs = [registerIx];
+      if (!existingCI) ixs.push(createCreateContactIndexInstruction(wallet.publicKey));
+      if (!existingGI) ixs.push(createCreateGroupIndexInstruction(wallet.publicKey));
+      ixs.push(createSessionIx, fundSessionIx);
+
+      // ONE transaction, ONE wallet popup: register + indexes (if needed) + create session + fund session
+      console.log('Building transaction (register + indexes + session + fund)...');
+      const transaction = await buildTransaction(connection, wallet.publicKey, ixs);
 
       console.log('Signing transaction with wallet...');
       const signedTransaction = await wallet.signTransaction(transaction);
@@ -1483,6 +1581,78 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     }
   };
 
+  // ============================================================================
+  // PRIVATE SOCIAL GRAPH HELPERS
+  // ============================================================================
+
+  const updateContactIndex = async (
+    newEntry: { randomId: Uint8Array; counterparty: Uint8Array } | null,
+    append: boolean
+  ) => {
+    if (!wallet?.publicKey || !encryptionKeys) return;
+    const session = sessionInfoRef.current || undefined;
+    const indexPDA = getContactIndexPDA(wallet.publicKey);
+    const indexAccount = await connection.getAccountInfo(indexPDA);
+
+    let entries: Array<{ randomId: Uint8Array; counterparty: Uint8Array }> = [];
+    if (indexAccount && indexAccount.data.length > 8 + 32 + 4) {
+      const indexData = deserializeContactIndex(indexAccount.data as Buffer);
+      if (indexData.encryptedEntries.length > 0) {
+        entries = decryptContactIndexEntries(indexData.encryptedEntries, indexData.nonce, encryptionKeys.secretKey) ?? [];
+      }
+    }
+
+    if (append && newEntry) {
+      entries.push(newEntry);
+    } else if (!append && newEntry) {
+      const targetHex = Buffer.from(newEntry.randomId).toString('hex');
+      entries = entries.filter(e => Buffer.from(e.randomId).toString('hex') !== targetHex);
+    }
+
+    const { ciphertext, nonce } = encryptContactIndexEntries(entries, encryptionKeys.secretKey);
+    const instructions = [];
+    if (!indexAccount) {
+      instructions.push(createCreateContactIndexInstruction(wallet.publicKey));
+    }
+    instructions.push(createUpdateContactIndexInstruction(wallet.publicKey, ciphertext, nonce, session));
+    await signAndSendTransaction(instructions);
+  };
+
+  const updateGroupIndex = async (
+    groupId: Uint8Array,
+    append: boolean
+  ) => {
+    if (!wallet?.publicKey || !encryptionKeys) return;
+    const session = sessionInfoRef.current || undefined;
+    const indexPDA = getGroupIndexPDA(wallet.publicKey);
+    const indexAccount = await connection.getAccountInfo(indexPDA);
+
+    let groupIds: Uint8Array[] = [];
+    if (indexAccount && indexAccount.data.length > 8 + 32 + 4) {
+      const indexData = deserializeGroupIndex(indexAccount.data as Buffer);
+      if (indexData.encryptedEntries.length > 0) {
+        groupIds = decryptGroupIndexEntries(indexData.encryptedEntries, indexData.nonce, encryptionKeys.secretKey) ?? [];
+      }
+    }
+
+    const targetHex = Buffer.from(groupId).toString('hex');
+    if (append) {
+      if (!groupIds.some(id => Buffer.from(id).toString('hex') === targetHex)) {
+        groupIds.push(groupId);
+      }
+    } else {
+      groupIds = groupIds.filter(id => Buffer.from(id).toString('hex') !== targetHex);
+    }
+
+    const { ciphertext, nonce } = encryptGroupIndexEntries(groupIds, encryptionKeys.secretKey);
+    const instructions = [];
+    if (!indexAccount) {
+      instructions.push(createCreateGroupIndexInstruction(wallet.publicKey));
+    }
+    instructions.push(createUpdateGroupIndexInstruction(wallet.publicKey, ciphertext, nonce, session));
+    await signAndSendTransaction(instructions);
+  };
+
   // Other functions (updateProfile, invite, etc.)
   const updateProfile = async (displayName: string, avatarType?: 'Emoji' | 'Nft', avatarData?: string) => {
     if (!wallet?.publicKey) throw new Error('Wallet not connected');
@@ -1495,7 +1665,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         displayName,
         avatarType || null,
         avatarData || null,
-        encryptionKeys ? Array.from(encryptionKeys.publicKey) : null,
+        encryptionKeys ? encryptionKeys.publicKey : null,
         session
       );
       const txSignature = await signAndSendTransaction([instruction]);
@@ -1538,31 +1708,51 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
   const invite = async (inviteePubkey: PublicKey) => {
     if (!wallet?.publicKey) throw new Error('Wallet not connected');
+    if (!encryptionKeys) throw new Error('Encryption keys not available');
 
     setLoading(true);
     try {
       const session = sessionInfoRef.current || undefined;
-      // Calculate chat hash for the conversation PDA
-      const chatHash = getChatHash(wallet.publicKey, inviteePubkey);
-      const instruction = createInviteInstruction(wallet.publicKey, inviteePubkey, chatHash, session);
+
+      // Fetch invitee's NaCl pubkey from their UserProfile
+      const profilePDA = getUserProfilePDA(inviteePubkey);
+      const profileAccount = await connection.getAccountInfo(profilePDA);
+      const inviteeNaclPubkey = profileAccount
+        ? parseEncryptionPubkey(profileAccount.data as Buffer) ?? undefined
+        : undefined;
+      if (!inviteeNaclPubkey) throw new Error('Recipient has no encryption key — they may not be registered');
+
+      // Generate random relationship ID
+      const randomId = nacl.randomBytes(32);
+
+      // Derive DH relationship key and encrypt {userA, userB}
+      const dhKey = deriveRelationshipKey(encryptionKeys.secretKey, inviteeNaclPubkey);
+      const { ciphertext: encData, nonce: dataNonce } = encryptRelationshipData(
+        wallet.publicKey, inviteePubkey, dhKey
+      );
+
+      // Encrypt sender identity for recipient (ephemeral key — hides sender from observers)
+      const { ciphertext: encSender, nonce: senderNonce } = encryptSenderForRecipient(
+        wallet.publicKey, inviteeNaclPubkey
+      );
+
+      const instruction = createCreatePrivateInviteInstruction(
+        wallet.publicKey, randomId, inviteePubkey,
+        encData, dataNonce, encSender, senderNonce, session
+      );
       const txSignature = await signAndSendTransaction([instruction]);
+
+      // Update our ContactIndex with this new relationship
+      await updateContactIndex(
+        { randomId, counterparty: inviteePubkey.toBytes() }, true
+      );
 
       await loadContacts();
 
-      // Send system message for invitation
+      // Notify recipient in real-time via direct socket (if online)
       if (socket) {
-        const conversationId = Buffer.from(chatHash).toString('hex');
-        const inviteMessage = {
-          conversationId,
-          sender: wallet.publicKey.toBase58(),
-          recipient: inviteePubkey.toBase58(),
-          type: 'system',
-          content: `You've been invited to chat on Mukon! Accept the invitation to start messaging.`,
-          timestamp: Date.now(),
-        };
-
-        socket.emit('send_message', inviteMessage);
-        console.log('📨 Sent invitation system message');
+        socket.emit('send_contact_invite', { recipientPubkey: inviteePubkey.toBase58() });
+        console.log('📨 Sent private invitation');
       }
 
       return txSignature;
@@ -1580,26 +1770,29 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     setLoading(true);
     try {
       const session = sessionInfoRef.current || undefined;
-      const instruction = createAcceptInvitationInstruction(wallet.publicKey, inviterPubkey, session);
+
+      // Find the pending invite in our contact list (populated by loadContacts via InvitePointer scan)
+      const pending = contactsRef.current.find(
+        c => c.publicKey.equals(inviterPubkey) && c.state === 'Requested' && c.randomId
+      );
+      if (!pending?.randomId) throw new Error('Invite not found — try refreshing contacts');
+
+      const randomId = pending.randomId;
+      const instruction = createAcceptPrivateInviteInstruction(
+        wallet.publicKey, randomId, wallet.publicKey, session
+      );
       const txSignature = await signAndSendTransaction([instruction]);
+
+      // Add to our ContactIndex (now we're an accepted participant)
+      await updateContactIndex(
+        { randomId, counterparty: inviterPubkey.toBytes() }, true
+      );
 
       await loadContacts();
 
-      // Send system message for acceptance
       if (socket) {
-        const chatHash = getChatHash(wallet.publicKey, inviterPubkey);
-        const conversationId = Buffer.from(chatHash).toString('hex');
-        const acceptMessage = {
-          conversationId,
-          sender: wallet.publicKey.toBase58(),
-          recipient: inviterPubkey.toBase58(),
-          type: 'system',
-          content: `Invitation accepted! You can now chat securely.`,
-          timestamp: Date.now(),
-        };
-
-        socket.emit('send_message', acceptMessage);
-        console.log('📨 Sent acceptance system message');
+        socket.emit('send_contact_accepted', { inviterPubkey: inviterPubkey.toBase58() });
+        console.log('📨 Notified inviter of acceptance');
       }
 
       return txSignature;
@@ -1617,10 +1810,18 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     setLoading(true);
     try {
       const session = sessionInfoRef.current || undefined;
-      const instruction = createRejectInvitationInstruction(wallet.publicKey, inviterPubkey, session);
+
+      const pending = contactsRef.current.find(
+        c => c.publicKey.equals(inviterPubkey) && c.state === 'Requested' && c.randomId
+      );
+      if (!pending?.randomId) throw new Error('Invite not found — try refreshing contacts');
+
+      const randomId = pending.randomId;
+      const instruction = createRejectPrivateInviteInstruction(
+        wallet.publicKey, randomId, wallet.publicKey, session
+      );
       const txSignature = await signAndSendTransaction([instruction]);
 
-      // Notify the other user that invitation was rejected
       if (socket) {
         socket.emit('invitation_rejected', {
           rejectorPubkey: wallet.publicKey.toBase58(),
@@ -1639,7 +1840,31 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const deleteContact = async (contactPubkey: PublicKey) => {
-    return rejectInvitation(contactPubkey);
+    if (!wallet?.publicKey) throw new Error('Wallet not connected');
+
+    setLoading(true);
+    try {
+      const session = sessionInfoRef.current || undefined;
+      const contact = contactsRef.current.find(c => c.publicKey.equals(contactPubkey) && c.randomId);
+      if (!contact?.randomId) {
+        // Fallback: try old reject path for legacy Relationship PDAs
+        return rejectInvitation(contactPubkey);
+      }
+
+      const instruction = createDeletePrivateRelationshipInstruction(
+        wallet.publicKey, contact.randomId, session
+      );
+      const txSignature = await signAndSendTransaction([instruction]);
+
+      await updateContactIndex({ randomId: contact.randomId, counterparty: contactPubkey.toBytes() }, false);
+      await loadContacts();
+      return txSignature;
+    } catch (error) {
+      console.error('Failed to delete contact:', error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
   };
 
   const blockContact = async (contactPubkey: PublicKey) => {
@@ -1648,7 +1873,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     setLoading(true);
     try {
       const session = sessionInfoRef.current || undefined;
-      const instruction = createBlockInstruction(wallet.publicKey, contactPubkey, session);
+      const contact = contactsRef.current.find(c => c.publicKey.equals(contactPubkey) && c.randomId);
+      if (!contact?.randomId) throw new Error('Contact not found');
+
+      const side: 0 | 1 = contact.isInitiator ? 0 : 1;
+      const instruction = createUpdateRelationshipStatusInstruction(
+        wallet.publicKey, contact.randomId, side, 5, session
+      );
       const txSignature = await signAndSendTransaction([instruction]);
 
       await loadContacts();
@@ -1667,7 +1898,13 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     setLoading(true);
     try {
       const session = sessionInfoRef.current || undefined;
-      const instruction = createUnblockInstruction(wallet.publicKey, contactPubkey, session);
+      const contact = contactsRef.current.find(c => c.publicKey.equals(contactPubkey) && c.randomId);
+      if (!contact?.randomId) throw new Error('Contact not found');
+
+      const side: 0 | 1 = contact.isInitiator ? 0 : 1;
+      const instruction = createUpdateRelationshipStatusInstruction(
+        wallet.publicKey, contact.randomId, side, 3, session
+      );
       const txSignature = await signAndSendTransaction([instruction]);
 
       await loadContacts();
@@ -1686,11 +1923,12 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     setLoading(true);
     try {
       const session = sessionInfoRef.current || undefined;
+      // Legacy cleanup — close old Relationship PDAs
       const instruction = createCloseRelationshipInstruction(wallet.publicKey, contactPubkey, session);
       const txSignature = await signAndSendTransaction([instruction]);
 
       await loadContacts();
-      console.log('✅ Relationship closed:', contactPubkey.toBase58().slice(0, 8));
+      console.log('✅ Legacy relationship closed:', contactPubkey.toBase58().slice(0, 8));
       return txSignature;
     } catch (error) {
       console.error('Failed to close relationship:', error);
@@ -1732,7 +1970,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         nonce: nonceBase64,
         sender: wallet.publicKey.toBase58(),
         timestamp,
-        replyTo: replyToMessageId, // Reply reference
+        replyTo: replyToMessageId,
+        targetPubkey: recipientPubkey.toBase58(),
       });
 
       console.log('✅ Encrypted message sent via socket');
@@ -1815,11 +2054,10 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   };
 
   const leaveConversation = (conversationId: string) => {
-    if (socket) {
-      socket.emit('leave_conversation', { conversationId });
-      setActiveConversation(null);
-      console.log('Leaving conversation:', conversationId);
-    }
+    // Don't leave the socket room — stay subscribed so messages arrive in real-time
+    // even when the user is on a different screen. Unread badge logic still works
+    // via activeConversation ref.
+    setActiveConversation(null);
   };
 
   const decryptConversationMessage = (
@@ -1972,7 +2210,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
   const loadContactsPending = useRef<boolean>(false);
 
   const loadContacts = async () => {
-    if (!wallet?.publicKey) return;
+    if (!wallet?.publicKey || !encryptionKeys) return;
 
     // Debounce: skip if called within last 3 seconds
     const now = Date.now();
@@ -1990,72 +2228,135 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
     try {
       const myKey = wallet.publicKey;
+      const result: Contact[] = [];
+      const seenPubkeys = new Set<string>();
 
-      // Sequential to avoid double-hitting RPC rate limits
-      const asA = await connection.getProgramAccounts(PROGRAM_ID, {
-        filters: [
-          { dataSize: 82 },
-          { memcmp: { offset: 8, bytes: myKey.toBase58() } },
-        ],
-      });
-      const asB = await connection.getProgramAccounts(PROGRAM_ID, {
-        filters: [
-          { dataSize: 82 },
-          { memcmp: { offset: 40, bytes: myKey.toBase58() } },
-        ],
-      });
+      // Helper to fetch profile data for a pubkey
+      const fetchProfile = async (pubkey: PublicKey) => {
+        const profilePDA = getUserProfilePDA(pubkey);
+        const profileAccount = await connection.getAccountInfo(profilePDA);
+        if (!profileAccount) return { displayName: undefined, avatarUrl: undefined, encryptionPublicKey: undefined };
+        const data = profileAccount.data as Buffer;
+        let offset = 8 + 32;
+        const nameLen = data.readUInt32LE(offset); offset += 4;
+        const displayName = data.slice(offset, offset + nameLen).toString('utf-8'); offset += nameLen;
+        offset += 1; // avatarType
+        const avatarLen = data.readUInt32LE(offset); offset += 4;
+        const avatarUrl = data.slice(offset, offset + avatarLen).toString('utf-8'); offset += avatarLen;
+        const encryptionPublicKey = new Uint8Array(data.slice(offset, offset + 32));
+        return { displayName, avatarUrl, encryptionPublicKey };
+      };
 
-      const allRelationships = [...asA, ...asB];
-      console.log('Found', allRelationships.length, 'relationships');
+      // ── Source 1: ContactIndex ──────────────────────────────────────────────
+      // Covers outgoing invites (sent by us) + relationships we accepted
+      const indexPDA = getContactIndexPDA(myKey);
+      const indexAccount = await connection.getAccountInfo(indexPDA);
 
-      const contactsWithKeys = await Promise.all(
-        allRelationships.map(async ({ account }) => {
-          const rel = deserializeRelationship(account.data);
-          const contact = getContactFromRelationship(rel, myKey);
-          if (!contact) return null;
+      if (indexAccount && indexAccount.data.length > 8 + 32 + 4) {
+        const indexData = deserializeContactIndex(indexAccount.data as Buffer);
+        if (indexData.encryptedEntries.length > 0) {
+          const entries = decryptContactIndexEntries(
+            indexData.encryptedEntries, indexData.nonce, encryptionKeys.secretKey
+          );
 
-          const peerProfilePDA = getUserProfilePDA(contact.peerPubkey);
-          const peerAccountInfo = await connection.getAccountInfo(peerProfilePDA);
+          if (entries) {
+            await Promise.all(entries.map(async (entry) => {
+              try {
+                const relPDA = getPrivateRelationshipPDA(entry.randomId);
+                const relAccount = await connection.getAccountInfo(relPDA);
+                if (!relAccount) return;
 
-          let displayName: string | undefined;
-          let avatarUrl: string | undefined;
-          let encryptionPublicKey: Uint8Array | undefined;
+                const rel = deserializePrivateRelationship(relAccount.data as Buffer);
+                const isInitiator = rel.initiator.equals(myKey);
+                const myStatus = isInitiator ? rel.statusA : rel.statusB;
+                const theirStatus = isInitiator ? rel.statusB : rel.statusA;
+                const counterparty = new PublicKey(entry.counterparty);
 
-          if (peerAccountInfo) {
-            const data = peerAccountInfo.data;
-            let offset = 8 + 32;
-            const displayNameLength = data.readUInt32LE(offset);
-            offset += 4;
-            displayName = data.slice(offset, offset + displayNameLength).toString('utf-8');
-            offset += displayNameLength;
-            const avatarType = data.readUInt8(offset);
-            offset += 1;
-            const avatarUrlLength = data.readUInt32LE(offset);
-            offset += 4;
-            avatarUrl = data.slice(offset, offset + avatarUrlLength).toString('utf-8');
-            offset += avatarUrlLength;
-            encryptionPublicKey = data.slice(offset, offset + 32);
+                const stateMap: Record<number, Contact['state']> = {
+                  0: 'Invited', 1: 'Invited', 2: 'Requested', 3: 'Accepted', 4: 'Rejected', 5: 'Blocked',
+                };
+                // Determine visible state from my perspective
+                let state: Contact['state'];
+                if (myStatus === 3 && theirStatus === 3) state = 'Accepted';
+                else if (myStatus === 5 || theirStatus === 5) state = 'Blocked';
+                else if (myStatus === 4 || theirStatus === 4) state = 'Rejected';
+                else if (isInitiator) state = 'Invited';  // I sent, they haven't accepted
+                else state = 'Requested';  // They sent, I accepted but status not mutual yet
 
-            if (contact.myStatus === 'Accepted') {
-              console.log(
-                `Loaded encryption key for ${contact.peerPubkey.toBase58().slice(0, 8)}...: ${Buffer.from(encryptionPublicKey).toString('hex').slice(0, 16)}...`
-              );
-            }
+                const profile = await fetchProfile(counterparty);
+                const pubkeyStr = counterparty.toBase58();
+                if (!seenPubkeys.has(pubkeyStr)) {
+                  seenPubkeys.add(pubkeyStr);
+                  result.push({
+                    publicKey: counterparty,
+                    state,
+                    randomId: rel.randomId,
+                    isInitiator,
+                    ...profile,
+                  });
+                  if (state === 'Accepted' && profile.encryptionPublicKey) {
+                    console.log(`🔑 Key loaded for ${pubkeyStr.slice(0, 8)}...`);
+                  }
+                }
+              } catch (e) {
+                console.error('Failed to load ContactIndex entry:', e);
+              }
+            }));
           }
+        }
+      }
 
-          return {
-            publicKey: contact.peerPubkey,
-            displayName,
-            avatarUrl,
-            encryptionPublicKey,
-            state: contact.myStatus,
-          };
-        })
-      );
+      // ── Source 2: InvitePointer scan ────────────────────────────────────────
+      // Incoming invites that we haven't responded to (state = 'Requested')
+      const invitePointers = await connection.getProgramAccounts(PROGRAM_ID, {
+        filters: [
+          // InvitePointer account discriminator (sha256("account:InvitePointer")[0..8])
+          { memcmp: { offset: 0, bytes: bs58.encode(Buffer.from([12, 10, 100, 71, 63, 152, 136, 96])) } },
+          { memcmp: { offset: 8, bytes: myKey.toBase58() } }, // recipient field
+        ],
+      });
 
-      const validContacts = contactsWithKeys.filter((c): c is NonNullable<typeof c> => c !== null);
-      console.log('Loaded peers with encryption keys:', validContacts.filter(c => c.encryptionPublicKey).length);
-      setContacts(validContacts);
+      await Promise.all(invitePointers.map(async ({ account }) => {
+        try {
+          const ptr = deserializeInvitePointer(account.data as Buffer);
+          const senderPubkey = decryptSenderFromRecipient(
+            ptr.encryptedSender, ptr.senderNonce, encryptionKeys.secretKey
+          );
+          if (!senderPubkey) return;
+
+          const pubkeyStr = senderPubkey.toBase58();
+          if (seenPubkeys.has(pubkeyStr)) return; // already in ContactIndex (accepted/rejected)
+          seenPubkeys.add(pubkeyStr);
+
+          const profile = await fetchProfile(senderPubkey);
+          result.push({
+            publicKey: senderPubkey,
+            state: 'Requested',
+            randomId: ptr.randomId,
+            isInitiator: false,
+            ...profile,
+          });
+        } catch (e) {
+          console.error('Failed to load InvitePointer:', e);
+        }
+      }));
+
+      console.log(`Loaded ${result.length} contacts (${result.filter(c => c.state === 'Accepted').length} accepted, ${result.filter(c => c.state === 'Pending').length} pending)`);
+      setContacts(result);
+
+      // Cache {pubkey -> displayName} so FCM background handler can resolve names
+      // without access to MessengerContext
+      if (wallet?.publicKey) {
+        const nameMap: Record<string, string> = {};
+        for (const c of result) {
+          if (c.displayName) nameMap[c.publicKey.toBase58()] = c.displayName;
+        }
+        AsyncStorage.setItem(
+          `@mukon_contact_names_${wallet.publicKey.toBase58()}`,
+          JSON.stringify(nameMap)
+        ).catch(() => {});
+        AsyncStorage.setItem('@mukon_last_wallet', wallet.publicKey.toBase58()).catch(() => {});
+      }
     } catch (error) {
       console.error('Failed to load contacts:', error);
     }
@@ -2069,6 +2370,11 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       const accountInfo = await connection.getAccountInfo(userProfile);
 
       if (!accountInfo) {
+        const cached = await AsyncStorage.getItem(`@mukon_profile_${wallet.publicKey.toBase58()}`);
+        if (cached) {
+          console.warn('⚠️ Profile PDA not found on-chain but cache exists — keeping cached profile (transient RPC miss?)');
+          return;
+        }
         console.log('No profile found, user needs to register');
         setProfile(null);
         return;
@@ -2076,7 +2382,6 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       if (!encryptionKeys) {
         console.warn('⚠️ Encryption keys not yet available, will retry when ready');
-        setProfile(null);
         return;
       }
 
@@ -2130,7 +2435,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       }
     } catch (error) {
       console.error('Failed to load profile:', error);
-      setProfile(null);
+      // Don't setProfile(null) on network/RPC errors — keep cached profile
     }
   };
 
@@ -2143,61 +2448,94 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
    * Returns true if mutual, false if not, null on error.
    */
   const verifyContactPrivately = async (queryPubkey: string): Promise<boolean | null> => {
-    if (!wallet?.publicKey) {
-      console.error('Wallet not connected');
-      return null;
-    }
+    if (!wallet?.publicKey) return null;
 
     try {
       console.log('🔒 Starting private contact verification via Arcium MPC...');
 
-      // 1. Get MXE public key for x25519 key exchange
-      const mxePubKey = await getMXEPubKey(connection);
-      console.log('✅ Got MXE public key');
+      await getMXEPubKey(connection); // warm up lazy client
+      const { publicKey: ephPublicKey, privateKey: ephPrivateKey, nonce } = await generateEphemeralKeys();
 
-      // 2. Generate ephemeral x25519 keypair + nonce for this computation
-      const { publicKey: ephPublicKey, privateKey: ephPrivateKey, nonce } = generateEphemeralKeys();
-
-      // 4. Find the Relationship PDA for this contact pair
       const contactPubkey = new PublicKey(queryPubkey);
       const relationshipPDA = getRelationshipPDA(wallet.publicKey, contactPubkey);
-
-      // Check it exists
       const relationshipAccount = await connection.getAccountInfo(relationshipPDA);
       if (!relationshipAccount) {
         console.log('No relationship found with', queryPubkey.slice(0, 8));
         return false;
       }
 
-      // 5. Generate unique computation offset
       const computationOffset = Math.floor(Date.now() / 1000);
 
-      // 6. Build and send check_mutual_contact transaction
-      console.log('📤 Queueing MPC check_mutual_contact computation...');
-      const session = sessionInfoRef.current || undefined;
-      const instruction = createCheckMutualContactInstruction(
-        wallet.publicKey,
-        computationOffset,
-        relationshipPDA,
-        0, // offset into account data where relationship status starts
-        82, // full relationship account length
-        ephPublicKey,
-        nonce,
-        session,
+      // Subscribe to program logs BEFORE sending tx so we capture the callback event.
+      // MutualContactResult layout: 8-byte discriminator + 32 ciphertext + 16 nonce + 32 enc_key = 88 bytes
+      let resolveEvent!: (r: { ciphertext: Uint8Array; nonce: Uint8Array; encryptionKey: Uint8Array }) => void;
+      let rejectEvent!: (e: Error) => void;
+      const eventPromise = new Promise<{ ciphertext: Uint8Array; nonce: Uint8Array; encryptionKey: Uint8Array }>(
+        (res, rej) => { resolveEvent = res; rejectEvent = rej; }
       );
+      let eventResolved = false;
+      const subId = connection.onLogs(
+        PROGRAM_ID,
+        ({ logs }: { logs: string[] }) => {
+          if (eventResolved) return;
+          for (const log of logs) {
+            if (!log.startsWith('Program data: ')) continue;
+            try {
+              const bytes = Buffer.from(log.slice('Program data: '.length), 'base64');
+              if (bytes.length === 88) {
+                eventResolved = true;
+                resolveEvent({
+                  ciphertext: new Uint8Array(bytes.slice(8, 40)),
+                  nonce: new Uint8Array(bytes.slice(40, 56)),
+                  encryptionKey: new Uint8Array(bytes.slice(56, 88)),
+                });
+              }
+            } catch { /* not our event */ }
+          }
+        },
+        'confirmed'
+      );
+      const timeoutId = setTimeout(() => {
+        if (!eventResolved) rejectEvent(new Error('Timeout waiting for MPC result event'));
+      }, 65000);
 
-      const txSig = await signAndSendTransaction([instruction]);
-      console.log('✅ MPC computation queued:', txSig);
+      try {
+        const session = sessionInfoRef.current || undefined;
+        const instruction = await createCheckMutualContactInstruction(
+          wallet.publicKey,
+          computationOffset,
+          relationshipPDA,
+          0,  // status_a/status_b offset in Relationship account
+          82, // account length
+          ephPublicKey,
+          nonce,
+          session,
+        );
+        const txSig = await signAndSendTransaction([instruction]);
+        console.log('📤 MPC computation queued:', txSig);
 
-      // 7. Wait for MPC nodes to compute result
-      console.log('⏳ Waiting for MPC nodes to verify relationship...');
-      await waitForComputation(connection, computationOffset, 60000);
+        console.log('⏳ Waiting for MPC nodes...');
+        await waitForComputation(connection, computationOffset, 60000);
 
-      console.log('✅ MPC computation completed — relationship verified privately');
-      // The callback emits MutualContactResult event with encrypted result
-      // For now return true to indicate computation succeeded
-      // Full decryption would use ephPrivateKey + result.encryption_key
-      return true;
+        // Callback tx has fired — grab the encrypted result from logs
+        const { ciphertext, nonce: resultNonce, encryptionKey } = await eventPromise;
+        const decrypted = await decryptResult(ciphertext, resultNonce, encryptionKey, ephPrivateKey);
+
+        // RescueCipher returns field elements. Bool is 0 (false) or 1 (true).
+        // Handle both bigint[] and Uint8Array return shapes.
+        let isMutual: boolean;
+        if (ArrayBuffer.isView(decrypted)) {
+          isMutual = Array.from(decrypted as Uint8Array).some(b => b !== 0);
+        } else {
+          isMutual = (decrypted as any)[0] !== 0n;
+        }
+
+        console.log('✅ Arcium result decrypted:', isMutual ? 'mutual contact ✓' : 'not mutual ✗');
+        return isMutual;
+      } finally {
+        clearTimeout(timeoutId);
+        connection.removeOnLogsListener(subId);
+      }
     } catch (error) {
       console.error('❌ Private contact verification failed:', error);
       return null;
@@ -2257,16 +2595,29 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         return updated;
       });
 
+      // Encrypt name and initial members list (just creator) with group secret
+      const { ciphertext: encName, nonce: nameNonce } = encryptGroupName(name, groupSecret);
+      const { ciphertext: encMembers, nonce: membersNonce } = encryptGroupMembers(
+        [wallet.publicKey],
+        groupSecret
+      );
+
       const instruction = createCreateGroupInstruction(
         wallet.publicKey,
         groupId,
-        name,
-        encryptionKeys.publicKey, // For key distribution
+        encName,
+        nameNonce,
+        encryptionKeys.publicKey, // For key distribution / group nacl pubkey
         tokenGate || null,
+        encMembers,
+        membersNonce,
         session
       );
 
       const txSignature = await signAndSendTransaction([instruction]);
+
+      // Add to creator's GroupIndex
+      await updateGroupIndex(groupId, true);
 
       await loadGroups();
 
@@ -2341,13 +2692,21 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
             session
           );
 
+      // Encrypt name and initial members list (creator + all invitees)
+      const allMembers = [wallet.publicKey, ...invitees];
+      const { ciphertext: encName, nonce: nameNonce } = encryptGroupName(name, groupSecret);
+      const { ciphertext: encMembers, nonce: membersNonce } = encryptGroupMembers(allMembers, groupSecret);
+
       const instructions = [
         createCreateGroupInstruction(
           wallet.publicKey,
           groupId,
-          name,
+          encName,
+          nameNonce,
           encryptionKeys.publicKey,
           tokenGate || null,
+          encMembers,
+          membersNonce,
           session
         ),
         ...inviteInstructions,
@@ -2356,6 +2715,9 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       // Single transaction with all instructions
       const txSignature = await signAndSendTransaction(instructions);
+
+      // Add to creator's GroupIndex
+      await updateGroupIndex(groupId, true);
 
       await loadGroups();
 
@@ -2454,10 +2816,22 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
     setLoading(true);
     try {
       const session = sessionInfoRef.current || undefined;
+      const groupIdHex = Buffer.from(groupId).toString('hex');
+      const groupSecret = groupKeysRef.current.get(groupIdHex);
+
+      let encryptedName: Uint8Array | null = null;
+      let nameNonce: Uint8Array | null = null;
+      if (name && groupSecret) {
+        const enc = encryptGroupName(name, groupSecret);
+        encryptedName = enc.ciphertext;
+        nameNonce = enc.nonce;
+      }
+
       const instruction = createUpdateGroupInstruction(
         wallet.publicKey,
         groupId,
-        name || null,
+        encryptedName,
+        nameNonce,
         tokenGate || null,
         session
       );
@@ -2591,6 +2965,9 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       );
 
       const txSignature = await signAndSendTransaction([instruction]);
+
+      // Add to member's GroupIndex on accept
+      await updateGroupIndex(groupId, true);
 
       await loadGroups();
       await loadGroupInvites();
@@ -2728,13 +3105,15 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
       const txSignature = await signAndSendTransaction(instructions);
 
-      // Remove group key from local storage
+      // Remove group key from local storage and GroupIndex
       const groupIdHex = Buffer.from(groupId).toString('hex');
       setGroupKeys(prev => {
         const updated = new Map(prev);
         updated.delete(groupIdHex);
         return updated;
       });
+
+      await updateGroupIndex(groupId, false);
 
       // Notify group via socket
       if (socket) {
@@ -2777,6 +3156,7 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
       // KEY ROTATION: Generate new group key and distribute to remaining members
       // This ensures kicked member can't decrypt future messages
       try {
+        const oldGroupSecret = groupKeysRef.current.get(groupIdHex); // capture before rotation
         const newGroupSecret = nacl.randomBytes(nacl.secretbox.keyLength);
 
         // Update local key
@@ -2813,7 +3193,12 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           // Prepare key shares for all remaining members
           const keyShares: Array<{ recipientPubkey: string; encryptedKey: string; nonce: string }> = [];
 
-          for (const member of updatedGroup.members) {
+          // Decrypt member list using OLD group secret (pre-rotation)
+          const remainingMembers = oldGroupSecret
+            ? (decryptGroupMembers(updatedGroup.encryptedMembers, updatedGroup.membersNonce, oldGroupSecret) ?? [])
+            : [];
+
+          for (const member of remainingMembers) {
             // Skip self (already stored above) and the kicked member
             if (member.equals(wallet.publicKey) || member.equals(memberPubkey)) continue;
 
@@ -3034,8 +3419,16 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
 
             if (groupAccountInfo) {
               const group = deserializeGroup(groupAccountInfo.data);
+              // Decrypt name + members using cached group secret
+              const secret = groupKeysRef.current.get(groupIdHex);
+              if (secret) {
+                group.name = decryptGroupName(group.encryptedName, group.nameNonce, secret) ?? undefined;
+                group.members = decryptGroupMembers(group.encryptedMembers, group.membersNonce, secret) ?? [];
+              } else {
+                group.members = [];
+              }
               loadedGroups.push(group);
-              console.log(`✅ Loaded group: ${group.name} (${group.members.length} members)`);
+              console.log(`✅ Loaded group: ${groupIdHex.slice(0, 8)} (${group.memberCount} members)`);
             }
           }
         } catch (error) {
@@ -3076,8 +3469,15 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
           // Skip if we've already loaded this group
           if (!uniqueGroupIds.has(groupIdHex)) {
             uniqueGroupIds.add(groupIdHex);
+            const secret = groupKeysRef.current.get(groupIdHex);
+            if (secret) {
+              group.name = decryptGroupName(group.encryptedName, group.nameNonce, secret) ?? undefined;
+              group.members = decryptGroupMembers(group.encryptedMembers, group.membersNonce, secret) ?? [];
+            } else {
+              group.members = [];
+            }
             loadedGroups.push(group);
-            console.log(`✅ Loaded creator group: ${group.name} (${group.members.length} members)`);
+            console.log(`✅ Loaded creator group: ${groupIdHex.slice(0, 8)} (${group.memberCount} members)`);
           }
         } catch (error) {
           console.error('Failed to deserialize creator group:', error);

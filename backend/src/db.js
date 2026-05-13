@@ -88,6 +88,12 @@ async function initDatabase() {
         PRIMARY KEY (group_id, recipient_pubkey)
       );
 
+      CREATE TABLE IF NOT EXISTS fcm_tokens (
+        user_pubkey TEXT PRIMARY KEY,
+        token TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+
       CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
       CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
       CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id);
@@ -322,6 +328,27 @@ async function deletePendingKeyShares(groupId) {
   await p.query('DELETE FROM pending_key_shares WHERE group_id = $1', [groupId]);
 }
 
+// ========== FCM TOKENS ==========
+
+async function saveFcmToken(userPubkey, token) {
+  if (!isEnabled()) return;
+  const p = getPool();
+  await p.query(
+    `INSERT INTO fcm_tokens (user_pubkey, token, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (user_pubkey)
+     DO UPDATE SET token = $2, updated_at = NOW()`,
+    [userPubkey, token]
+  );
+}
+
+async function getFcmToken(userPubkey) {
+  if (!isEnabled()) return null;
+  const p = getPool();
+  const result = await p.query('SELECT token FROM fcm_tokens WHERE user_pubkey = $1', [userPubkey]);
+  return result.rows.length > 0 ? result.rows[0].token : null;
+}
+
 // ========== GROUP CLEANUP (for group_deleted) ==========
 
 async function deleteGroupData(groupId) {
@@ -365,4 +392,7 @@ module.exports = {
   deletePendingKeyShares,
   // Group cleanup
   deleteGroupData,
+  // FCM tokens
+  saveFcmToken,
+  getFcmToken,
 };

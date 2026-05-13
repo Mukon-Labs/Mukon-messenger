@@ -29,18 +29,24 @@ const DISCRIMINATORS = {
   accept: Buffer.from([0x41, 0x96, 0x46, 0xd8, 0x85, 0x06, 0x6b, 0x04]), // 419646d885066b04
   accept_group_invite: Buffer.from([0xbe, 0x30, 0x7f, 0x36, 0x49, 0x93, 0xe3, 0xfd]), // be307f364993e3fd
   accept_group_invite_compressed: Buffer.from([0x05, 0x90, 0xdc, 0xba, 0x61, 0x11, 0xbd, 0xff]), // 0590dcba6111bdff
+  accept_private_invite: Buffer.from([0x32, 0x75, 0x25, 0xa6, 0x65, 0x20, 0xc3, 0xfc]), // 327525a66520c3fc
   block: Buffer.from([0xee, 0xea, 0x6e, 0x15, 0x79, 0x2b, 0x32, 0x91]), // eeea6e15792b3291
   check_mutual_contact: Buffer.from([0x4e, 0x62, 0x21, 0xd2, 0x9e, 0x00, 0xec, 0xac]), // 4e6221d29e00ecac
   close_compressed_group_key: Buffer.from([0xd2, 0x80, 0x92, 0xc1, 0xd7, 0x10, 0xd5, 0xb7]), // d28092c1d710d5b7
   close_group: Buffer.from([0x28, 0xbb, 0xc9, 0xbb, 0x12, 0xc2, 0x7a, 0xe8]), // 28bbc9bb12c27ae8
   close_group_key: Buffer.from([0x5d, 0x2b, 0xd4, 0x16, 0x33, 0x97, 0x3e, 0x03]), // 5d2bd41633973e03
+  close_old_relationship: Buffer.from([0xd0, 0x54, 0x3d, 0x18, 0xa7, 0xb6, 0xff, 0x2d]), // d0543d18a7b6ff2d
   close_profile: Buffer.from([0xa7, 0x24, 0xb5, 0x08, 0x88, 0x9e, 0x2e, 0xcf]), // a724b508889e2ecf
   close_relationship: Buffer.from([0x05, 0x3d, 0x2f, 0xb6, 0x95, 0xc0, 0xd7, 0x1a]), // 053d2fb695c0d71a
   close_wallet_descriptor: Buffer.from([0x9f, 0x11, 0x66, 0x26, 0xc1, 0x44, 0xbc, 0x54]), // 9f116626c144bc54
   count_accepted_callback: Buffer.from([0x2c, 0x63, 0x42, 0x0d, 0x15, 0x07, 0x1c, 0xaa]), // 2c63420d15071caa
   count_accepted_contacts: Buffer.from([0xd3, 0x76, 0x6e, 0xfb, 0xe2, 0x3a, 0x3c, 0x4d]), // d3766efbe23a3c4d
+  create_contact_index: Buffer.from([0x96, 0x78, 0x14, 0xed, 0xf2, 0x2d, 0x5a, 0xb1]), // 967814edf22d5ab1
   create_group: Buffer.from([0x4f, 0x3c, 0x9e, 0x86, 0x3d, 0xc7, 0x38, 0xf8]), // 4f3c9e863dc738f8
+  create_group_index: Buffer.from([0x82, 0xce, 0xe7, 0x12, 0x5e, 0xa2, 0x14, 0x9e]), // 82cee7125ea2149e
+  create_private_invite: Buffer.from([0x00, 0x9b, 0x1e, 0xed, 0x82, 0xc6, 0x67, 0xf3]), // 009b1eed82c667f3
   create_session: Buffer.from([0xf2, 0xc1, 0x8f, 0xb3, 0x96, 0x19, 0x7a, 0xe3]), // f2c18fb396197ae3
+  delete_private_relationship: Buffer.from([0x06, 0xec, 0xb6, 0xa8, 0xce, 0x78, 0x8e, 0x2d]), // 06ecb6a8ce788e2d
   init_add_two_numbers_comp_def: Buffer.from([0x43, 0xee, 0x95, 0x82, 0xa3, 0xa4, 0x21, 0xf1]), // 43ee9582a3a421f1
   init_count_accepted_comp_def: Buffer.from([0x11, 0xee, 0xc7, 0x80, 0x8e, 0x16, 0x75, 0x5e]), // 11eec7808e16755e
   init_is_mutual_contact_comp_def: Buffer.from([0x0b, 0x2e, 0xb2, 0xaa, 0xc0, 0x96, 0x1b, 0xd0]), // 0b2eb2aac0961bd0
@@ -54,13 +60,18 @@ const DISCRIMINATORS = {
   reject: Buffer.from([0x87, 0x07, 0x3f, 0x55, 0x83, 0x72, 0x6f, 0xe0]), // 87073f5583726fe0
   reject_group_invite: Buffer.from([0xa2, 0xe1, 0x8b, 0x8e, 0x35, 0xb6, 0xd9, 0xe7]), // a2e18b8e35b6d9e7
   reject_group_invite_compressed: Buffer.from([0x61, 0x09, 0x98, 0x1d, 0xfc, 0x5a, 0x0d, 0x9c]), // 6109981dfc5a0d9c
+  reject_private_invite: Buffer.from([0xe4, 0x4b, 0xb3, 0xb4, 0x98, 0xbd, 0x9d, 0x69]), // e44bb3b498bd9d69
   revoke_session: Buffer.from([0x56, 0x5c, 0xc6, 0x78, 0x90, 0x02, 0x07, 0xc2]), // 565cc678900207c2
   store_compressed_group_key: Buffer.from([0xaa, 0x74, 0x0b, 0x51, 0xbb, 0x27, 0x2e, 0x2f]), // aa740b51bb272e2f
   store_group_key: Buffer.from([0x25, 0x39, 0x5b, 0x44, 0x63, 0x70, 0xce, 0x9b]), // 25395b446370ce9b
   store_group_key_for_member: Buffer.from([0x18, 0x8c, 0xa4, 0xea, 0xaf, 0xb5, 0xb2, 0xae]), // 188ca4eaafb5b2ae
   unblock: Buffer.from([0xc2, 0x31, 0xad, 0x2b, 0xf6, 0xa4, 0x0e, 0x0b]), // c231ad2bf6a40e0b
+  update_contact_index: Buffer.from([0x5a, 0xc7, 0x3a, 0xce, 0xf9, 0xef, 0x7a, 0xe6]), // 5ac73acef9ef7ae6
   update_group: Buffer.from([0x09, 0xf2, 0x01, 0x6e, 0x5b, 0x16, 0xac, 0x61]), // 09f2016e5b16ac61
+  update_group_index: Buffer.from([0x8d, 0xee, 0x1b, 0x80, 0x48, 0x72, 0xfc, 0xbf]), // 8dee1b804872fcbf
+  update_group_members_list: Buffer.from([0xdf, 0x6b, 0xb9, 0xfa, 0x35, 0x25, 0xf8, 0x74]), // df6bb9fa3525f874
   update_profile: Buffer.from([0x62, 0x43, 0x63, 0xce, 0x56, 0x73, 0xaf, 0x01]), // 624363ce5673af01
+  update_relationship_status: Buffer.from([0x1b, 0x71, 0xed, 0x55, 0x12, 0x81, 0xbf, 0xde]), // 1b71ed551281bfde
 };
 
 // PDA derivation helpers
@@ -147,12 +158,50 @@ export function getRelationshipPDA(a: PublicKey, b: PublicKey): PublicKey {
   return pda;
 }
 
+export function getPrivateRelationshipPDA(randomId: Uint8Array): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('priv_rel'), Buffer.from(randomId), Buffer.from([1])],
+    PROGRAM_ID
+  );
+  return pda;
+}
+
+export function getContactIndexPDA(owner: PublicKey): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('contact_index'), owner.toBuffer(), Buffer.from([1])],
+    PROGRAM_ID
+  );
+  return pda;
+}
+
+export function getInvitePointerPDA(recipient: PublicKey, randomId: Uint8Array): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('invite_ptr'), recipient.toBuffer(), Buffer.from(randomId), Buffer.from([1])],
+    PROGRAM_ID
+  );
+  return pda;
+}
+
+export function getGroupIndexPDA(owner: PublicKey): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('group_index'), owner.toBuffer(), Buffer.from([1])],
+    PROGRAM_ID
+  );
+  return pda;
+}
+
 // Borsh serialization helpers
 function serializeString(str: string): Buffer {
   const encoded = Buffer.from(str, 'utf8');
   const length = Buffer.alloc(4);
   length.writeUInt32LE(encoded.length, 0);
   return Buffer.concat([length, encoded]);
+}
+
+function serializeBytes(bytes: Uint8Array): Buffer {
+  const length = Buffer.alloc(4);
+  length.writeUInt32LE(bytes.length, 0);
+  return Buffer.concat([length, Buffer.from(bytes)]);
 }
 
 // ========== SESSION KEY INSTRUCTIONS ==========
@@ -543,14 +592,17 @@ function serializeOptionTokenGate(tokenGate: { mint: PublicKey; minBalance: bigi
 }
 
 /**
- * Build create_group instruction
+ * Build create_group instruction (encrypted name + members)
  */
 export function createCreateGroupInstruction(
   payer: PublicKey,
   groupId: Uint8Array,
-  name: string,
+  encryptedName: Uint8Array,
+  nameNonce: Uint8Array,
   encryptionPubkey: Uint8Array,
   tokenGate: { mint: PublicKey; minBalance: bigint } | null,
+  encryptedMembers: Uint8Array,
+  membersNonce: Uint8Array,
   session?: SessionInfo
 ): TransactionInstruction {
   const signer = session ? session.sessionKey : payer;
@@ -559,9 +611,12 @@ export function createCreateGroupInstruction(
   const data = Buffer.concat([
     DISCRIMINATORS.create_group,
     Buffer.from(groupId),
-    serializeString(name),
+    serializeBytes(encryptedName),
+    Buffer.from(nameNonce),
     Buffer.from(encryptionPubkey),
     serializeOptionTokenGate(tokenGate),
+    serializeBytes(encryptedMembers),
+    Buffer.from(membersNonce),
   ]);
 
   return new TransactionInstruction({
@@ -577,12 +632,13 @@ export function createCreateGroupInstruction(
 }
 
 /**
- * Build update_group instruction
+ * Build update_group instruction (encrypted name)
  */
 export function createUpdateGroupInstruction(
   payer: PublicKey,
   groupId: Uint8Array,
-  name: string | null,
+  encryptedName: Uint8Array | null,
+  nameNonce: Uint8Array | null,
   tokenGate: { mint: PublicKey; minBalance: bigint } | null,
   session?: SessionInfo
 ): TransactionInstruction {
@@ -591,11 +647,14 @@ export function createUpdateGroupInstruction(
 
   const parts: Buffer[] = [DISCRIMINATORS.update_group];
 
-  if (name !== null) {
-    parts.push(Buffer.from([1]));
-    parts.push(serializeString(name));
+  if (encryptedName !== null && nameNonce !== null) {
+    parts.push(Buffer.from([1])); // Some encrypted_name
+    parts.push(serializeBytes(encryptedName));
+    parts.push(Buffer.from([1])); // Some name_nonce
+    parts.push(Buffer.from(nameNonce));
   } else {
-    parts.push(Buffer.from([0]));
+    parts.push(Buffer.from([0])); // None encrypted_name
+    parts.push(Buffer.from([0])); // None name_nonce
   }
 
   parts.push(serializeOptionTokenGate(tokenGate));
@@ -893,6 +952,271 @@ export function createStoreGroupKeyForMemberInstruction(
   });
 }
 
+// ========== PRIVATE SOCIAL GRAPH INSTRUCTION BUILDERS ==========
+
+export function createCreateContactIndexInstruction(payer: PublicKey): TransactionInstruction {
+  const contactIndex = getContactIndexPDA(payer);
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: contactIndex, isSigner: false, isWritable: true },
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data: DISCRIMINATORS.create_contact_index,
+  });
+}
+
+export function createUpdateContactIndexInstruction(
+  payer: PublicKey,
+  encryptedEntries: Uint8Array,
+  nonce: Uint8Array,
+  session?: SessionInfo
+): TransactionInstruction {
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const contactIndex = getContactIndexPDA(authority);
+
+  const data = Buffer.concat([
+    DISCRIMINATORS.update_contact_index,
+    serializeBytes(encryptedEntries),
+    Buffer.from(nonce),
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: contactIndex, isSigner: false, isWritable: true },
+      { pubkey: authority, isSigner: false, isWritable: false },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+export function createCreateGroupIndexInstruction(payer: PublicKey): TransactionInstruction {
+  const groupIndex = getGroupIndexPDA(payer);
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: groupIndex, isSigner: false, isWritable: true },
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data: DISCRIMINATORS.create_group_index,
+  });
+}
+
+export function createUpdateGroupIndexInstruction(
+  payer: PublicKey,
+  encryptedEntries: Uint8Array,
+  nonce: Uint8Array,
+  session?: SessionInfo
+): TransactionInstruction {
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const groupIndex = getGroupIndexPDA(authority);
+
+  const data = Buffer.concat([
+    DISCRIMINATORS.update_group_index,
+    serializeBytes(encryptedEntries),
+    Buffer.from(nonce),
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: groupIndex, isSigner: false, isWritable: true },
+      { pubkey: authority, isSigner: false, isWritable: false },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+export function createCreatePrivateInviteInstruction(
+  payer: PublicKey,
+  randomId: Uint8Array,
+  recipient: PublicKey,
+  encryptedData: Uint8Array,
+  dataNonce: Uint8Array,
+  encryptedSender: Uint8Array,
+  senderNonce: Uint8Array,
+  session?: SessionInfo
+): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
+  const privateRelationship = getPrivateRelationshipPDA(randomId);
+  const invitePointer = getInvitePointerPDA(recipient, randomId);
+
+  const data = Buffer.concat([
+    DISCRIMINATORS.create_private_invite,
+    Buffer.from(randomId),
+    serializeBytes(encryptedData),
+    Buffer.from(dataNonce),
+    serializeBytes(encryptedSender),
+    Buffer.from(senderNonce),
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: privateRelationship, isSigner: false, isWritable: true },
+      { pubkey: invitePointer, isSigner: false, isWritable: true },
+      { pubkey: recipient, isSigner: false, isWritable: false },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+export function createAcceptPrivateInviteInstruction(
+  payer: PublicKey,
+  randomId: Uint8Array,
+  recipientPubkey: PublicKey,
+  session?: SessionInfo
+): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
+  const privateRelationship = getPrivateRelationshipPDA(randomId);
+  const invitePointer = getInvitePointerPDA(recipientPubkey, randomId);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: privateRelationship, isSigner: false, isWritable: true },
+      { pubkey: invitePointer, isSigner: false, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data: DISCRIMINATORS.accept_private_invite,
+  });
+}
+
+export function createRejectPrivateInviteInstruction(
+  payer: PublicKey,
+  randomId: Uint8Array,
+  recipientPubkey: PublicKey,
+  session?: SessionInfo
+): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
+  const privateRelationship = getPrivateRelationshipPDA(randomId);
+  const invitePointer = getInvitePointerPDA(recipientPubkey, randomId);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: privateRelationship, isSigner: false, isWritable: true },
+      { pubkey: invitePointer, isSigner: false, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data: DISCRIMINATORS.reject_private_invite,
+  });
+}
+
+export function createUpdateRelationshipStatusInstruction(
+  payer: PublicKey,
+  randomId: Uint8Array,
+  side: 0 | 1,
+  newStatus: number,
+  session?: SessionInfo
+): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
+  const privateRelationship = getPrivateRelationshipPDA(randomId);
+
+  const data = Buffer.concat([
+    DISCRIMINATORS.update_relationship_status,
+    Buffer.from([side]),
+    Buffer.from([newStatus]),
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: privateRelationship, isSigner: false, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+export function createDeletePrivateRelationshipInstruction(
+  payer: PublicKey,
+  randomId: Uint8Array,
+  session?: SessionInfo
+): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
+  const privateRelationship = getPrivateRelationshipPDA(randomId);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: privateRelationship, isSigner: false, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data: DISCRIMINATORS.delete_private_relationship,
+  });
+}
+
+export function createUpdateGroupMembersListInstruction(
+  payer: PublicKey,
+  groupId: Uint8Array,
+  encryptedMembers: Uint8Array,
+  membersNonce: Uint8Array,
+  session?: SessionInfo
+): TransactionInstruction {
+  const signer = session ? session.sessionKey : payer;
+  const group = getGroupPDA(groupId);
+
+  const data = Buffer.concat([
+    DISCRIMINATORS.update_group_members_list,
+    serializeBytes(encryptedMembers),
+    Buffer.from(membersNonce),
+  ]);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: group, isSigner: false, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
+
+export function createCloseOldRelationshipInstruction(
+  payer: PublicKey,
+  peer: PublicKey,
+  session?: SessionInfo
+): TransactionInstruction {
+  const authority = session ? session.walletPubkey : payer;
+  const signer = session ? session.sessionKey : payer;
+  const relationship = getRelationshipPDA(authority, peer);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: relationship, isSigner: false, isWritable: true },
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: session ? session.sessionTokenPDA : PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data: DISCRIMINATORS.close_old_relationship,
+  });
+}
+
 // ========== TRANSACTION BUILDER ==========
 
 /**
@@ -1042,11 +1366,47 @@ export interface TokenGate {
 export interface Group {
   groupId: Uint8Array;
   creator: PublicKey;
-  name: string;
   createdAt: bigint;
-  members: PublicKey[];
+  memberCount: number;
   encryptionPubkey: Uint8Array;
   tokenGate: TokenGate | null;
+  encryptedName: Uint8Array;
+  nameNonce: Uint8Array;
+  encryptedMembers: Uint8Array;
+  membersNonce: Uint8Array;
+  // Client-populated after decryption (not on-chain)
+  name?: string;
+  members?: PublicKey[];
+}
+
+export interface PrivateRelationship {
+  randomId: Uint8Array;
+  statusA: number;
+  statusB: number;
+  createdAt: bigint;
+  initiator: PublicKey;
+  encryptedData: Uint8Array;
+  dataNonce: Uint8Array;
+}
+
+export interface ContactIndex {
+  owner: PublicKey;
+  encryptedEntries: Uint8Array;
+  nonce: Uint8Array;
+}
+
+export interface InvitePointer {
+  recipient: PublicKey;
+  randomId: Uint8Array;
+  encryptedSender: Uint8Array;
+  senderNonce: Uint8Array;
+  createdAt: bigint;
+}
+
+export interface GroupIndex {
+  owner: PublicKey;
+  encryptedEntries: Uint8Array;
+  nonce: Uint8Array;
 }
 
 export interface GroupInvite {
@@ -1065,68 +1425,73 @@ export interface GroupKeyShare {
 }
 
 export function deserializeGroup(data: Buffer): Group {
-  // Validate Group account discriminator (defense-in-depth)
-  const expectedDiscriminator = Buffer.from([0xd1, 0xf9, 0xd0, 0x3f, 0xb6, 0x59, 0xba, 0xfe]);
-  const actualDiscriminator = data.slice(0, 8);
-  if (!actualDiscriminator.equals(expectedDiscriminator)) {
-    throw new Error('Invalid Group account discriminator');
-  }
+  let offset = 8; // Skip discriminator
 
-  let offset = 8; // Skip 8-byte discriminator
+  const groupId = new Uint8Array(data.slice(offset, offset + 32)); offset += 32;
+  const creator = new PublicKey(data.slice(offset, offset + 32)); offset += 32;
+  const createdAt = data.readBigInt64LE(offset); offset += 8;
+  const memberCount = data.readUInt32LE(offset); offset += 4;
+  const encryptionPubkey = new Uint8Array(data.slice(offset, offset + 32)); offset += 32;
 
-  // Read group_id (32 bytes)
-  const groupId = new Uint8Array(data.slice(offset, offset + 32));
-  offset += 32;
-
-  // Read creator (32 bytes)
-  const creator = new PublicKey(data.slice(offset, offset + 32));
-  offset += 32;
-
-  // Read name (string with length prefix)
-  const nameLength = data.readUInt32LE(offset);
-  offset += 4;
-  const name = data.slice(offset, offset + nameLength).toString('utf8');
-  offset += nameLength;
-
-  // Read created_at (8 bytes)
-  const createdAt = data.readBigInt64LE(offset);
-  offset += 8;
-
-  // Read members vector
-  const membersLength = data.readUInt32LE(offset);
-  offset += 4;
-  const members: PublicKey[] = [];
-  for (let i = 0; i < membersLength; i++) {
-    members.push(new PublicKey(data.slice(offset, offset + 32)));
-    offset += 32;
-  }
-
-  // Read encryption_pubkey (32 bytes)
-  const encryptionPubkey = new Uint8Array(data.slice(offset, offset + 32));
-  offset += 32;
-
-  // Read Option<TokenGate>
-  const hasTokenGate = data.readUInt8(offset);
-  offset += 1;
-
+  const hasTokenGate = data.readUInt8(offset); offset += 1;
   let tokenGate: TokenGate | null = null;
   if (hasTokenGate === 1) {
-    const mint = new PublicKey(data.slice(offset, offset + 32));
-    offset += 32;
-    const minBalance = data.readBigUInt64LE(offset);
-    offset += 8;
+    const mint = new PublicKey(data.slice(offset, offset + 32)); offset += 32;
+    const minBalance = data.readBigUInt64LE(offset); offset += 8;
     tokenGate = { mint, minBalance };
   }
 
-  return {
-    groupId,
-    creator,
-    name,
-    createdAt,
-    members,
-    encryptionPubkey,
-    tokenGate,
-  };
+  const encNameLen = data.readUInt32LE(offset); offset += 4;
+  const encryptedName = new Uint8Array(data.slice(offset, offset + encNameLen)); offset += encNameLen;
+  const nameNonce = new Uint8Array(data.slice(offset, offset + 24)); offset += 24;
+
+  const encMembersLen = data.readUInt32LE(offset); offset += 4;
+  const encryptedMembers = new Uint8Array(data.slice(offset, offset + encMembersLen)); offset += encMembersLen;
+  const membersNonce = new Uint8Array(data.slice(offset, offset + 24)); offset += 24;
+
+  return { groupId, creator, createdAt, memberCount, encryptionPubkey, tokenGate, encryptedName, nameNonce, encryptedMembers, membersNonce };
+}
+
+export function deserializePrivateRelationship(data: Buffer): PrivateRelationship {
+  let offset = 8;
+  const randomId = new Uint8Array(data.slice(offset, offset + 32)); offset += 32;
+  const statusA = data.readUInt8(offset); offset += 1;
+  const statusB = data.readUInt8(offset); offset += 1;
+  const createdAt = data.readBigInt64LE(offset); offset += 8;
+  const initiator = new PublicKey(data.slice(offset, offset + 32)); offset += 32;
+  const encDataLen = data.readUInt32LE(offset); offset += 4;
+  const encryptedData = new Uint8Array(data.slice(offset, offset + encDataLen)); offset += encDataLen;
+  const dataNonce = new Uint8Array(data.slice(offset, offset + 24)); offset += 24;
+  return { randomId, statusA, statusB, createdAt, initiator, encryptedData, dataNonce };
+}
+
+export function deserializeContactIndex(data: Buffer): ContactIndex {
+  let offset = 8;
+  const owner = new PublicKey(data.slice(offset, offset + 32)); offset += 32;
+  const entriesLen = data.readUInt32LE(offset); offset += 4;
+  const encryptedEntries = new Uint8Array(data.slice(offset, offset + entriesLen)); offset += entriesLen;
+  const nonce = new Uint8Array(data.slice(offset, offset + 24)); offset += 24;
+  return { owner, encryptedEntries, nonce };
+}
+
+export function deserializeInvitePointer(data: Buffer): InvitePointer {
+  let offset = 8;
+  const recipient = new PublicKey(data.slice(offset, offset + 32)); offset += 32;
+  const randomId = new Uint8Array(data.slice(offset, offset + 32)); offset += 32;
+  const senderLen = data.readUInt32LE(offset); offset += 4;
+  const encryptedSender = new Uint8Array(data.slice(offset, offset + senderLen)); offset += senderLen;
+  const senderNonce = new Uint8Array(data.slice(offset, offset + 24)); offset += 24;
+  const createdAt = data.readBigInt64LE(offset); offset += 8;
+  return { recipient, randomId, encryptedSender, senderNonce, createdAt };
+}
+
+export function deserializeGroupIndex(data: Buffer): GroupIndex {
+  let offset = 8;
+  const owner = new PublicKey(data.slice(offset, offset + 32)); offset += 32;
+  const entriesLen = data.readUInt32LE(offset); offset += 4;
+  const encryptedEntries = new Uint8Array(data.slice(offset, offset + entriesLen)); offset += entriesLen;
+  const nonce = new Uint8Array(data.slice(offset, offset + 24)); offset += 24;
+  return { owner, encryptedEntries, nonce };
 }
 
 export function deserializeGroupInvite(data: Buffer): GroupInvite {
@@ -1218,7 +1583,7 @@ async function deriveCompressedAddress(
   programId: PublicKey
 ): Promise<{ address: PublicKey; addressTree: PublicKey; addressQueue: PublicKey }> {
   // Get default address tree info from Light Protocol
-  const addressTreeInfo = await getDefaultAddressTreeInfo(lightRpc);
+  const addressTreeInfo = getDefaultAddressTreeInfo();
   const addressTree = addressTreeInfo.tree;
   const addressQueue = addressTreeInfo.queue;
 
@@ -1874,11 +2239,11 @@ const ARCIUM_CLOCK = new PublicKey('ARC3JqAVRc8jj1tNe4u1oGbf4VPMHYxj5VhvNhGSC3D6
 /**
  * Build init_is_mutual_contact_comp_def instruction
  */
-export function createInitIsMutualContactCompDefInstruction(
+export async function createInitIsMutualContactCompDefInstruction(
   payer: PublicKey
-): TransactionInstruction {
-  const mxeAccount = getMXEAddress();
-  const compDefAccount = getCompDefAddress('is_mutual_contact');
+): Promise<TransactionInstruction> {
+  const mxeAccount = await getMXEAddress();
+  const compDefAccount = await getCompDefAddress('is_mutual_contact');
 
   const data = DISCRIMINATORS.init_is_mutual_contact_comp_def;
 
@@ -1898,11 +2263,11 @@ export function createInitIsMutualContactCompDefInstruction(
 /**
  * Build init_count_accepted_comp_def instruction
  */
-export function createInitCountAcceptedCompDefInstruction(
+export async function createInitCountAcceptedCompDefInstruction(
   payer: PublicKey
-): TransactionInstruction {
-  const mxeAccount = getMXEAddress();
-  const compDefAccount = getCompDefAddress('count_accepted');
+): Promise<TransactionInstruction> {
+  const mxeAccount = await getMXEAddress();
+  const compDefAccount = await getCompDefAddress('count_accepted');
 
   const data = DISCRIMINATORS.init_count_accepted_comp_def;
 
@@ -1922,11 +2287,11 @@ export function createInitCountAcceptedCompDefInstruction(
 /**
  * Build init_add_two_numbers_comp_def instruction
  */
-export function createInitAddTwoNumbersCompDefInstruction(
+export async function createInitAddTwoNumbersCompDefInstruction(
   payer: PublicKey
-): TransactionInstruction {
-  const mxeAccount = getMXEAddress();
-  const compDefAccount = getCompDefAddress('add_two_numbers');
+): Promise<TransactionInstruction> {
+  const mxeAccount = await getMXEAddress();
+  const compDefAccount = await getCompDefAddress('add_two_numbers');
 
   const data = DISCRIMINATORS.init_add_two_numbers_comp_def;
 
@@ -1963,7 +2328,7 @@ const INSTRUCTIONS_SYSVAR = new PublicKey('Sysvar1nstructions1111111111111111111
  *       relationship_offset (u32), relationship_length (u32),
  *       pub_key ([u8; 32] x25519 ephemeral), nonce (u128)
  */
-export function createCheckMutualContactInstruction(
+export async function createCheckMutualContactInstruction(
   payer: PublicKey,
   computationOffset: number,
   relationshipAccount: PublicKey,
@@ -1972,8 +2337,8 @@ export function createCheckMutualContactInstruction(
   x25519PubKey: Uint8Array,
   nonce: Uint8Array,
   session?: SessionInfo,
-): TransactionInstruction {
-  const signerPubkey = session ? session.sessionPubkey : payer;
+): Promise<TransactionInstruction> {
+  const signerPubkey = session ? session.sessionKey : payer;
 
   const data = Buffer.alloc(8 + 8 + 32 + 4 + 4 + 32 + 16);
   let offset = 0;
@@ -1988,12 +2353,12 @@ export function createCheckMutualContactInstruction(
   const keys = [
     { pubkey: signerPubkey, isSigner: true, isWritable: true },
     { pubkey: getSignPDA(), isSigner: false, isWritable: true },
-    { pubkey: getMXEAddress(), isSigner: false, isWritable: false },
-    { pubkey: getMempoolAddress(), isSigner: false, isWritable: true },
-    { pubkey: getExecutingPoolAddress(), isSigner: false, isWritable: true },
-    { pubkey: getComputationAddress(computationOffset), isSigner: false, isWritable: true },
-    { pubkey: getCompDefAddress('is_mutual_contact'), isSigner: false, isWritable: false },
-    { pubkey: getClusterAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getMXEAddress(), isSigner: false, isWritable: false },
+    { pubkey: await getMempoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getExecutingPoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getComputationAddress(computationOffset), isSigner: false, isWritable: true },
+    { pubkey: await getCompDefAddress('is_mutual_contact'), isSigner: false, isWritable: false },
+    { pubkey: await getClusterAddress(), isSigner: false, isWritable: true },
     { pubkey: ARCIUM_FEE_POOL, isSigner: false, isWritable: true },
     { pubkey: ARCIUM_CLOCK, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -2010,7 +2375,7 @@ export function createCheckMutualContactInstruction(
 /**
  * Build count_accepted_contacts instruction — queues MPC to count accepted contacts privately
  */
-export function createCountAcceptedContactsInstruction(
+export async function createCountAcceptedContactsInstruction(
   payer: PublicKey,
   computationOffset: number,
   contactListAccount: PublicKey,
@@ -2019,8 +2384,8 @@ export function createCountAcceptedContactsInstruction(
   x25519PubKey: Uint8Array,
   nonce: Uint8Array,
   session?: SessionInfo,
-): TransactionInstruction {
-  const signerPubkey = session ? session.sessionPubkey : payer;
+): Promise<TransactionInstruction> {
+  const signerPubkey = session ? session.sessionKey : payer;
 
   const data = Buffer.alloc(8 + 8 + 32 + 4 + 4 + 32 + 16);
   let offset = 0;
@@ -2035,12 +2400,12 @@ export function createCountAcceptedContactsInstruction(
   const keys = [
     { pubkey: signerPubkey, isSigner: true, isWritable: true },
     { pubkey: getSignPDA(), isSigner: false, isWritable: true },
-    { pubkey: getMXEAddress(), isSigner: false, isWritable: false },
-    { pubkey: getMempoolAddress(), isSigner: false, isWritable: true },
-    { pubkey: getExecutingPoolAddress(), isSigner: false, isWritable: true },
-    { pubkey: getComputationAddress(computationOffset), isSigner: false, isWritable: true },
-    { pubkey: getCompDefAddress('count_accepted'), isSigner: false, isWritable: false },
-    { pubkey: getClusterAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getMXEAddress(), isSigner: false, isWritable: false },
+    { pubkey: await getMempoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getExecutingPoolAddress(), isSigner: false, isWritable: true },
+    { pubkey: await getComputationAddress(computationOffset), isSigner: false, isWritable: true },
+    { pubkey: await getCompDefAddress('count_accepted'), isSigner: false, isWritable: false },
+    { pubkey: await getClusterAddress(), isSigner: false, isWritable: true },
     { pubkey: ARCIUM_FEE_POOL, isSigner: false, isWritable: true },
     { pubkey: ARCIUM_CLOCK, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },

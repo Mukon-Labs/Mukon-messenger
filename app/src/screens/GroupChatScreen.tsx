@@ -6,6 +6,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
 import { TextInput, IconButton, Text, Menu, Dialog, Portal, Button, Avatar } from 'react-native-paper';
 import * as Clipboard from 'expo-clipboard';
@@ -22,6 +23,12 @@ import ChatBackground from '../components/ChatBackground';
 import { getUserProfilePDA, createStoreGroupKeyInstruction, buildTransaction } from '../utils/transactions';
 import { getGroupAvatar } from '../utils/domains';
 import { useDarkAlert } from '../components/DarkAlert';
+
+function formatCallDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
 
 export default function GroupChatScreen() {
   const route = useRoute();
@@ -56,6 +63,7 @@ export default function GroupChatScreen() {
   const [memberProfiles, setMemberProfiles] = useState<Map<string, { name: string; avatar: string }>>(new Map());
   const [renameDialogVisible, setRenameDialogVisible] = useState(false);
   const [newName, setNewName] = useState('');
+  const [isSending, setIsSending] = useState(false);
   const flatListRef = useRef<FlatList>(null);
   const hasAttemptedBackup = useRef<Set<string>>(new Set());
 
@@ -114,7 +122,7 @@ export default function GroupChatScreen() {
     const loadMemberProfiles = async () => {
       const profiles = new Map<string, { name: string; avatar: string }>();
 
-      for (const memberPubkey of currentGroup.members) {
+      for (const memberPubkey of (currentGroup.members ?? [])) {
         try {
           const profilePDA = getUserProfilePDA(memberPubkey);
           const accountInfo = await connection.getAccountInfo(profilePDA);
@@ -322,20 +330,25 @@ export default function GroupChatScreen() {
   }, [groupMessages, groupId, groupKeys, wallet?.publicKey]);
 
   const handleSend = async () => {
-    if (!messageText.trim()) return;
+    if (!messageText.trim() || isSending) return;
 
+    setIsSending(true);
     try {
       await sendGroupMessage(groupId, messageText.trim());
       setMessageText('');
       clearReply();
-
-      // Scroll to bottom
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
       }, 100);
-    } catch (error) {
-      console.error('Failed to send message:', error);
-      showAlert('Error', 'Failed to send message');
+    } catch (error: any) {
+      const msg = error?.message?.includes('insufficient')
+        ? 'Insufficient SOL balance'
+        : error?.message?.includes('rejected') || error?.message?.includes('declined')
+        ? 'Transaction rejected'
+        : error?.message || 'Failed to send message';
+      showAlert('Error', msg);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -452,6 +465,28 @@ export default function GroupChatScreen() {
   };
 
   const renderMessage = ({ item }: { item: any }) => {
+    // Call history entries
+    if (item.type === 'call') {
+      try {
+        const { callType, duration } = JSON.parse(item.content || '{}');
+        const durationStr = duration ? ` · ${formatCallDuration(duration)}` : '';
+        const icon = callType === 'missed' || callType === 'declined' ? '📵' : '📞';
+        const label = callType === 'missed' ? 'Missed call'
+          : callType === 'declined' ? 'Declined call'
+          : `Call${durationStr}`;
+        return (
+          <View style={styles.systemMessageContainer}>
+            <Text style={styles.systemMessage}>{icon} {label}</Text>
+            <Text style={styles.systemTimestamp}>
+              {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          </View>
+        );
+      } catch {
+        return null;
+      }
+    }
+
     // Get member profile
     const memberProfile = memberProfiles.get(item.sender);
     const senderName = memberProfile?.name || item.sender.slice(0, 8);
@@ -689,9 +724,12 @@ export default function GroupChatScreen() {
           placeholderTextColor={theme.colors.textSecondary}
           right={
             <TextInput.Icon
-              icon="send"
+              icon={isSending
+                ? () => <ActivityIndicator size={20} color={theme.colors.primary} />
+                : 'send'}
               onPress={handleSend}
-              color={messageText.trim() ? theme.colors.primary : theme.colors.textSecondary}
+              disabled={isSending || !messageText.trim()}
+              color={messageText.trim() && !isSending ? theme.colors.primary : theme.colors.textSecondary}
             />
           }
         />
@@ -924,5 +962,25 @@ const styles = StyleSheet.create({
   },
   quickReactEmoji: {
     fontSize: 28,
+  },
+  systemMessageContainer: {
+    alignItems: 'center',
+    marginVertical: 8,
+    paddingHorizontal: 16,
+  },
+  systemMessage: {
+    color: theme.colors.textSecondary,
+    fontSize: 14,
+    fontStyle: 'italic',
+    textAlign: 'center',
+    backgroundColor: theme.colors.surface,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  systemTimestamp: {
+    color: theme.colors.textSecondary,
+    fontSize: 10,
+    marginTop: 4,
   },
 });

@@ -7,6 +7,36 @@ const nacl = require('tweetnacl');
 const bs58 = require('bs58').default; // bs58 v6 uses default export
 const db = require('./db');
 
+// Firebase Admin — dormant until FIREBASE_SERVICE_ACCOUNT env var is set
+let fcmAdmin = null;
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    const admin = require('firebase-admin');
+    admin.initializeApp({
+      credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+    });
+    fcmAdmin = admin;
+    console.log('✅ Firebase Admin initialized');
+  } catch (e) {
+    console.warn('⚠️ Firebase Admin init failed:', e.message);
+  }
+}
+
+async function sendFcmNotification(token, data) {
+  if (!fcmAdmin || !token) return false;
+  try {
+    await fcmAdmin.messaging().send({
+      token,
+      data,
+      android: { priority: 'high' },
+    });
+    return true;
+  } catch (e) {
+    console.warn('⚠️ FCM send failed:', e.message);
+    return false;
+  }
+}
+
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -33,6 +63,8 @@ const memPendingKeyShares = new Map(); // groupId -> Map<recipientPubkey, { encr
 // Always in-memory (ephemeral connection state)
 const onlineUsers = new Map(); // pubkey -> socket.id
 const groupRooms = new Map(); // groupId -> Set<socket.id>
+const pendingCalls = new Map(); // targetPubkey -> { callId, callerPubkey, sdp, callerSocketId, expiresAt }
+const pendingCallEnds = new Map(); // targetPubkey -> { callId, expiresAt } — buffered call_end/decline for offline callee
 
 // ========== STORAGE ABSTRACTION ==========
 // Each function checks db.isEnabled() and falls back to in-memory Maps
@@ -347,6 +379,26 @@ io.on('connection', (socket) => {
       socket.publicKey = publicKey;
       socket.emit('authenticated', { success: true });
       console.log('User authenticated:', publicKey);
+
+      // Deliver any buffered call that arrived while socket was reconnecting
+      const pending = pendingCalls.get(publicKey);
+      if (pending && Date.now() < pending.expiresAt) {
+        socket.emit('call_offer', {
+          callId: pending.callId,
+          callerPubkey: pending.callerPubkey,
+          sdp: pending.sdp,
+        });
+        pendingCalls.delete(publicKey);
+        console.log(`📞 Delivered buffered call ${pending.callId.slice(0, 8)}... to reconnected ${publicKey.slice(0, 8)}...`);
+      }
+
+      // Deliver any buffered call_end or call_decline (caller cancelled while callee was offline)
+      const pendingEnd = pendingCallEnds.get(publicKey);
+      if (pendingEnd && Date.now() < pendingEnd.expiresAt) {
+        socket.emit(pendingEnd.event, { callId: pendingEnd.callId });
+        pendingCallEnds.delete(publicKey);
+        console.log(`📞 Delivered buffered ${pendingEnd.event} ${pendingEnd.callId.slice(0, 8)}... to reconnected ${publicKey.slice(0, 8)}...`);
+      }
     } else {
       socket.emit('authenticated', { success: false, error: 'Invalid signature' });
     }
@@ -364,7 +416,7 @@ io.on('connection', (socket) => {
     console.log(`${socket.publicKey} left conversation: ${conversationId}`);
   });
 
-  socket.on('send_message', async ({ conversationId, content, encrypted, nonce, sender, timestamp, type, replyTo }) => {
+  socket.on('send_message', async ({ conversationId, content, encrypted, nonce, sender, timestamp, type, replyTo, targetPubkey }) => {
     if (!socket.publicKey && type !== 'system') {
       socket.emit('error', { message: 'Not authenticated' });
       return;
@@ -414,6 +466,22 @@ io.on('connection', (socket) => {
     const roomSize = room ? room.size : 0;
     console.log(`Broadcasting message to room ${conversationId} (${roomSize} clients)`);
     io.to(conversationId).emit('new_message', messageData);
+
+    // FCM push if DM target is offline
+    if (targetPubkey && type !== 'system' && socket.publicKey) {
+      const targetSocketId = onlineUsers.get(targetPubkey);
+      if (!targetSocketId) {
+        const fcmToken = await db.getFcmToken(targetPubkey).catch(() => null);
+        if (fcmToken) {
+          await sendFcmNotification(fcmToken, {
+            type: 'incoming_message',
+            senderPubkey: socket.publicKey,
+            conversationId,
+          });
+          console.log(`📬 FCM message push sent to ${targetPubkey.slice(0, 8)}...`);
+        }
+      }
+    }
   });
 
   socket.on('delete_message', async ({ conversationId, messageId, deleteForBoth }) => {
@@ -851,6 +919,42 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('send_contact_accepted', ({ inviterPubkey }) => {
+    if (!socket.publicKey) return;
+    console.log(`✅ Contact accepted: ${socket.publicKey.slice(0, 8)}... accepted ${inviterPubkey.slice(0, 8)}...`);
+    const inviterSocketId = onlineUsers.get(inviterPubkey);
+    if (inviterSocketId) {
+      io.to(inviterSocketId).emit('contact_accepted_received', { acceptorPubkey: socket.publicKey });
+      console.log(`✅ Notified ${inviterPubkey.slice(0, 8)}... their invite was accepted`);
+    } else {
+      console.log(`⚠️  Inviter ${inviterPubkey.slice(0, 8)}... is offline — they'll see it on next load`);
+    }
+  });
+
+  socket.on('send_contact_invite', ({ recipientPubkey }) => {
+    if (!socket.publicKey) return;
+    console.log(`📨 Contact invite: ${socket.publicKey.slice(0, 8)}... → ${recipientPubkey.slice(0, 8)}...`);
+    const recipientSocketId = onlineUsers.get(recipientPubkey);
+    if (recipientSocketId) {
+      io.to(recipientSocketId).emit('contact_invite_received', { senderPubkey: socket.publicKey });
+      console.log(`✅ Notified ${recipientPubkey.slice(0, 8)}... of new contact invite`);
+    } else {
+      console.log(`⚠️  Recipient ${recipientPubkey.slice(0, 8)}... is offline — they'll see it on next load`);
+    }
+  });
+
+  // ========== FCM TOKEN REGISTRATION ==========
+
+  socket.on('register_fcm_token', async ({ token }) => {
+    if (!socket.publicKey || !token) return;
+    try {
+      await db.saveFcmToken(socket.publicKey, token);
+      console.log(`✅ FCM token saved for ${socket.publicKey.slice(0, 8)}...`);
+    } catch (e) {
+      console.warn('⚠️ Failed to save FCM token:', e.message);
+    }
+  });
+
   // ========== VOICE CALL SIGNALING (pure relay, no DB) ==========
 
   socket.on('call_offer', ({ callId, targetPubkey, sdp }) => {
@@ -864,8 +968,36 @@ io.on('connection', (socket) => {
       });
       console.log(`📞 Call offer ${callId.slice(0, 8)}... from ${socket.publicKey.slice(0, 8)}... to ${targetPubkey.slice(0, 8)}...`);
     } else {
-      socket.emit('call_busy', { callId, reason: 'offline' });
-      console.log(`📞 Call ${callId.slice(0, 8)}... target ${targetPubkey.slice(0, 8)}... is offline`);
+      // Buffer for 20s — Android reconnects in 1-3s; deliver on reconnect
+      const callerPubkey = socket.publicKey;
+      const callerSocketId = socket.id;
+      pendingCalls.set(targetPubkey, { callId, callerPubkey, sdp, callerSocketId, expiresAt: Date.now() + 20000 });
+      console.log(`📞 Call ${callId.slice(0, 8)}... buffered 20s for offline ${targetPubkey.slice(0, 8)}...`);
+
+      setTimeout(async () => {
+        const still = pendingCalls.get(targetPubkey);
+        if (still && still.callId === callId) {
+          pendingCalls.delete(targetPubkey);
+          // Notify caller only if still connected
+          const callerSocket = io.sockets.sockets.get(callerSocketId);
+          if (callerSocket) {
+            callerSocket.emit('call_busy', { callId, reason: 'offline' });
+          }
+          console.log(`📞 Call ${callId.slice(0, 8)}... expired — target never reconnected`);
+
+          // Try FCM as last resort (app fully closed)
+          const fcmToken = await db.getFcmToken(targetPubkey).catch(() => null);
+          if (fcmToken) {
+            await sendFcmNotification(fcmToken, {
+              type: 'incoming_call',
+              callId,
+              callerPubkey,
+              callerName: callerPubkey.slice(0, 8) + '...',
+            });
+            console.log(`📞 FCM call notification sent to ${targetPubkey.slice(0, 8)}...`);
+          }
+        }
+      }, 20000);
     }
   });
 
@@ -892,6 +1024,9 @@ io.on('connection', (socket) => {
     if (targetSocketId) {
       io.to(targetSocketId).emit('call_decline', { callId });
       console.log(`📞 Call ${callId.slice(0, 8)}... declined by ${socket.publicKey.slice(0, 8)}...`);
+    } else {
+      pendingCallEnds.set(targetPubkey, { callId, event: 'call_decline', expiresAt: Date.now() + 30000 });
+      setTimeout(() => pendingCallEnds.delete(targetPubkey), 30000);
     }
   });
 
@@ -901,6 +1036,9 @@ io.on('connection', (socket) => {
     if (targetSocketId) {
       io.to(targetSocketId).emit('call_end', { callId });
       console.log(`📞 Call ${callId.slice(0, 8)}... ended by ${socket.publicKey.slice(0, 8)}...`);
+    } else {
+      pendingCallEnds.set(targetPubkey, { callId, event: 'call_end', expiresAt: Date.now() + 30000 });
+      setTimeout(() => pendingCallEnds.delete(targetPubkey), 30000);
     }
   });
 
@@ -910,6 +1048,25 @@ io.on('connection', (socket) => {
     if (targetSocketId) {
       io.to(targetSocketId).emit('call_busy', { callId, reason: 'busy' });
     }
+  });
+
+  socket.on('call_event', async ({ targetPubkey, conversationId, callType, duration }) => {
+    if (!socket.publicKey || !conversationId) return;
+    const msg = {
+      id: `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      type: 'call',
+      conversationId,
+      content: JSON.stringify({ callType, duration: duration ?? null, initiator: socket.publicKey }),
+      sender: socket.publicKey,
+      timestamp: Date.now(),
+    };
+    // Save so it loads on history fetch
+    await store.saveMessage(conversationId, msg);
+    // Deliver to both parties
+    const targetSocketId = onlineUsers.get(targetPubkey);
+    if (targetSocketId) io.to(targetSocketId).emit('message_received', msg);
+    socket.emit('message_received', msg);
+    console.log(`📞 Call event: ${callType} in conv ${conversationId.slice(0, 8)}...`);
   });
 
   socket.on('disconnect', () => {

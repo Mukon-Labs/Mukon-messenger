@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, FlatList, StyleSheet, KeyboardAvoidingView, Platform, TouchableOpacity } from 'react-native';
+import { View, FlatList, StyleSheet, KeyboardAvoidingView, Platform, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { TextInput, IconButton, Text, Avatar, Menu, Dialog, Portal, Button } from 'react-native-paper';
 import * as Clipboard from 'expo-clipboard';
 import { PublicKey } from '@solana/web3.js';
@@ -17,6 +17,12 @@ import AvatarDisplay from '../components/AvatarDisplay';
 import { useDarkAlert } from '../components/DarkAlert';
 import { useCall } from '../contexts/CallContext';
 
+function formatCallDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
+
 export default function ChatScreen({ route, navigation }: any) {
   const { contact } = route.params;
   const { showAlert, DarkAlertComponent } = useDarkAlert();
@@ -32,6 +38,7 @@ export default function ChatScreen({ route, navigation }: any) {
   const [replyToMessage, setReplyToMessage] = React.useState<any>(null);
   const [quickReactVisible, setQuickReactVisible] = React.useState<string | null>(null);
   const [profileModalVisible, setProfileModalVisible] = React.useState(false);
+  const [isSending, setIsSending] = React.useState(false);
   const wallet = useWallet();
   const messenger = useMessenger();
   const { startCall } = useCall();
@@ -86,6 +93,19 @@ export default function ChatScreen({ route, navigation }: any) {
         timestamp: new Date(msg.timestamp || Date.now()),
         isMe: false,
         isSystem: true,
+      };
+    }
+
+    // Call history entries
+    if (msg.type === 'call') {
+      return {
+        id: msg.id || `${idx}`,
+        sender: msg.sender,
+        content: msg.content,
+        timestamp: new Date(msg.timestamp || Date.now()),
+        isMe: false,
+        isSystem: false,
+        isCall: true,
       };
     }
 
@@ -228,10 +248,10 @@ export default function ChatScreen({ route, navigation }: any) {
   const groupsInCommon = React.useMemo(() => {
     if (!wallet.publicKey) return [];
     return messenger.groups
-      .filter(g => g.members.some(m => m.toBase58() === contact.pubkey))
+      .filter(g => (g.members ?? []).some(m => m.toBase58() === contact.pubkey))
       .map(g => ({
         groupId: Buffer.from(g.groupId).toString('hex'),
-        name: g.name,
+        name: g.name ?? '',
         avatar: messenger.groupAvatars.get(Buffer.from(g.groupId).toString('hex')),
       }));
   }, [messenger.groups, messenger.groupAvatars, contact.pubkey, wallet.publicKey]);
@@ -283,19 +303,27 @@ export default function ChatScreen({ route, navigation }: any) {
   }, [navigation, displayName]);
 
   const sendMessage = async () => {
-    if (!message.trim() || !wallet.publicKey) return;
+    if (!message.trim() || !wallet.publicKey || isSending) return;
 
+    setIsSending(true);
     try {
       await messenger.sendMessage(
         conversationId,
         message.trim(),
         new PublicKey(contact.pubkey),
-        replyToMessage?.id // Pass reply-to message ID if replying
+        replyToMessage?.id
       );
       setMessage('');
-      clearReply(); // Clear reply after sending
-    } catch (error) {
-      console.error('Failed to send message:', error);
+      clearReply();
+    } catch (error: any) {
+      const msg = error?.message?.includes('insufficient')
+        ? 'Insufficient SOL balance'
+        : error?.message?.includes('rejected') || error?.message?.includes('declined')
+        ? 'Transaction rejected'
+        : error?.message || 'Failed to send message';
+      showAlert('Error', msg);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -386,6 +414,28 @@ export default function ChatScreen({ route, navigation }: any) {
           </Text>
         </View>
       );
+    }
+
+    // Call history entries
+    if (item.isCall) {
+      try {
+        const { callType, duration } = JSON.parse(item.content || '{}');
+        const durationStr = duration ? ` · ${formatCallDuration(duration)}` : '';
+        const icon = callType === 'missed' || callType === 'declined' ? '📵' : '📞';
+        const label = callType === 'missed' ? 'Missed call'
+          : callType === 'declined' ? 'Declined call'
+          : `Call${durationStr}`;
+        return (
+          <View style={styles.systemMessageContainer}>
+            <Text style={styles.systemMessage}>{icon} {label}</Text>
+            <Text style={styles.systemTimestamp}>
+              {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          </View>
+        );
+      } catch {
+        return null;
+      }
     }
 
     // Regular encrypted messages with avatar for incoming messages
@@ -588,9 +638,12 @@ export default function ChatScreen({ route, navigation }: any) {
           placeholderTextColor={theme.colors.textSecondary}
           right={
             <TextInput.Icon
-              icon="send"
+              icon={isSending
+                ? () => <ActivityIndicator size={20} color={theme.colors.primary} />
+                : 'send'}
               onPress={sendMessage}
-              color={message.trim() ? theme.colors.primary : theme.colors.textSecondary}
+              disabled={isSending || !message.trim()}
+              color={message.trim() && !isSending ? theme.colors.primary : theme.colors.textSecondary}
             />
           }
         />

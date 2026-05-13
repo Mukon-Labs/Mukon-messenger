@@ -1,7 +1,11 @@
 import * as Notifications from 'expo-notifications';
-import { Platform } from 'react-native';
+import { Platform, Linking, PermissionsAndroid } from 'react-native';
+import notifee, {
+  AndroidCategory,
+  AndroidImportance,
+  AndroidVisibility,
+} from '@notifee/react-native';
 
-// Configure notification handler
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -13,7 +17,7 @@ Notifications.setNotificationHandler({
 });
 
 export interface NotificationData {
-  type: 'dm' | 'group';
+  type: 'dm' | 'group' | 'call';
   conversationId?: string;
   groupId?: string;
   senderPubkey: string;
@@ -21,13 +25,8 @@ export interface NotificationData {
   messagePreview: string;
 }
 
-/**
- * Initialize the notifications system
- * Call this when the app starts
- */
 export async function initializeNotifications(): Promise<boolean> {
   try {
-    // Request permissions
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
 
@@ -43,7 +42,6 @@ export async function initializeNotifications(): Promise<boolean> {
 
     console.log('✅ Notification permissions granted');
 
-    // Set up Android notification channel (required for Android)
     if (Platform.OS === 'android') {
       await Notifications.setNotificationChannelAsync('messages', {
         name: 'Messages',
@@ -54,6 +52,25 @@ export async function initializeNotifications(): Promise<boolean> {
       });
 
       console.log('✅ Android notification channel created');
+
+      // Android 14+ (API 34): USE_FULL_SCREEN_INTENT is not auto-granted.
+      // Direct user to the specific settings page once so full-screen call popup works.
+      // Wrapped in its own try/catch — must not break channel creation if it throws.
+      if (Platform.Version >= 34) {
+        const granted = await PermissionsAndroid.check(
+          'android.permission.USE_FULL_SCREEN_INTENT' as any
+        );
+        if (!granted) {
+          try {
+            await Linking.sendIntent(
+              'android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENTS',
+              [{ key: 'android.provider.extra.APP_PACKAGE', value: 'com.mukon.messenger' }]
+            );
+          } catch (e) {
+            console.warn('⚠️ Could not open full screen intent settings:', e);
+          }
+        }
+      }
     }
 
     return true;
@@ -63,31 +80,27 @@ export async function initializeNotifications(): Promise<boolean> {
   }
 }
 
-/**
- * Send a local notification for a new message
- */
 export async function sendMessageNotification(
   senderPubkey: string,
   senderName: string | undefined,
   messagePreview: string,
   conversationId: string,
   type: 'dm' | 'group',
-  groupId?: string
+  groupId?: string,
+  groupName?: string
 ): Promise<void> {
   try {
-    const title = type === 'dm'
-      ? (senderName || `${senderPubkey.slice(0, 8)}...`)
-      : (senderName ? `${senderName} in group` : `Group message`);
+    const displayName = senderName || `${senderPubkey.slice(0, 8)}...`;
+    const body = type === 'dm'
+      ? `${displayName}: ${messagePreview}`
+      : `${displayName}${groupName ? ` in ${groupName}` : ''}: ${messagePreview}`;
 
-    // Truncate message preview if too long
-    const truncatedPreview = messagePreview.length > 100
-      ? messagePreview.slice(0, 97) + '...'
-      : messagePreview;
+    const truncatedBody = body.length > 100 ? body.slice(0, 97) + '...' : body;
 
     await Notifications.scheduleNotificationAsync({
       content: {
-        title,
-        body: truncatedPreview,
+        title: 'Mukon Messenger',
+        body: truncatedBody,
         data: {
           type,
           conversationId,
@@ -97,24 +110,90 @@ export async function sendMessageNotification(
           messagePreview,
         } as NotificationData,
         sound: 'default',
+        ...(Platform.OS === 'android' && { android: { channelId: 'messages' } } as any),
       },
-      trigger: null, // Send immediately
+      trigger: null,
     });
 
-    console.log(`✅ Notification sent for message from ${senderName || senderPubkey.slice(0, 8)}...`);
+    console.log(`✅ Notification sent for message from ${displayName}`);
   } catch (error) {
     console.error('❌ Failed to send notification:', error);
   }
 }
 
-/**
- * Update the app badge count
- */
+// Full-screen incoming call notification via notifee.
+// On a locked/off screen: wakes the device and shows full-screen overlay.
+// When phone is in use: shows a large heads-up banner with Accept/Decline.
+export async function sendCallNotification(
+  callerName: string,
+  callerPubkey: string
+): Promise<void> {
+  try {
+    const displayName = callerName || `${callerPubkey.slice(0, 8)}...`;
+
+    const channelId = await notifee.createChannel({
+      id: 'calls',
+      name: 'Incoming Calls',
+      importance: AndroidImportance.HIGH,
+      vibration: true,
+      sound: 'default',
+      bypassDnd: true,
+    });
+
+    await notifee.displayNotification({
+      id: 'incoming-call',
+      title: 'Incoming call',
+      body: `${displayName} is calling...`,
+      android: {
+        channelId,
+        category: AndroidCategory.CALL,
+        importance: AndroidImportance.HIGH,
+        visibility: AndroidVisibility.PUBLIC,
+        // Wakes screen and shows full-screen overlay on locked/off screen
+        fullScreenAction: {
+          id: 'default',
+          launchActivity: 'default',
+        },
+        pressAction: { id: 'default', launchActivity: 'default' },
+        actions: [
+          {
+            title: '📵 Decline',
+            pressAction: { id: 'decline' },
+          },
+          {
+            title: '📞 Accept',
+            pressAction: { id: 'accept' },
+          },
+        ],
+        sound: 'default',
+        vibrationPattern: [100, 500, 250, 500, 250, 500],
+        lights: ['#22c55e', 500, 500],
+      },
+    });
+
+    console.log(`✅ Call notification sent for ${displayName}`);
+  } catch (error) {
+    console.error('❌ Failed to send call notification:', error);
+  }
+}
+
 export async function setBadgeCount(count: number): Promise<void> {
   try {
     await Notifications.setBadgeCountAsync(count);
-    console.log(`✅ Badge count set to ${count}`);
   } catch (error) {
     console.error('❌ Failed to set badge count:', error);
+  }
+}
+
+export async function setupFcm(socket: any): Promise<void> {
+  try {
+    const { getMessaging, getToken } = require('@react-native-firebase/messaging');
+    const messagingInstance = getMessaging();
+    const token = await getToken(messagingInstance);
+    socket.emit('register_fcm_token', { token });
+
+    console.log('✅ FCM token registered');
+  } catch (e: any) {
+    console.warn('⚠️ FCM setup failed:', e?.message || e);
   }
 }
