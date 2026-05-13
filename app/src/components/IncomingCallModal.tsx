@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, Modal, Animated, TouchableOpacity, Text } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, StyleSheet, Modal, Animated, TouchableOpacity, Text, Platform } from 'react-native';
+import { Audio } from 'expo-av';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import AvatarDisplay from './AvatarDisplay';
 import { Contact } from '../contexts/CallContext';
@@ -13,8 +14,49 @@ interface IncomingCallModalProps {
 
 export default function IncomingCallModal({ visible, caller, onAccept, onDecline }: IncomingCallModalProps) {
   const [ringAnim] = useState(new Animated.Value(1));
+  const soundRef = useRef<Audio.Sound | null>(null);
 
+  // Looping ringtone — plays system default ringtone while modal is visible
   useEffect(() => {
+    if (!visible) return;
+
+    let mounted = true;
+    const startRingtone = async () => {
+      try {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: false,
+          playThroughEarpieceAndroid: false,
+        });
+        const uri = Platform.OS === 'android'
+          ? 'content://settings/system/ringtone'
+          : undefined;
+        if (!uri) return;
+        const { sound } = await Audio.Sound.createAsync(
+          { uri },
+          { shouldPlay: true, isLooping: true, volume: 1.0 }
+        );
+        if (!mounted) { sound.unloadAsync(); return; }
+        soundRef.current = sound;
+      } catch (e) {
+        console.warn('📞 Ringtone unavailable:', e);
+      }
+    };
+
+    startRingtone();
+
+    return () => {
+      mounted = false;
+      soundRef.current?.stopAsync().catch(() => {});
+      soundRef.current?.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    };
+  }, [visible]);
+
+  // Avatar pulse animation
+  useEffect(() => {
+    if (!visible) return;
     Animated.loop(
       Animated.sequence([
         Animated.timing(ringAnim, { toValue: 1.1, duration: 500, useNativeDriver: true }),
@@ -22,7 +64,7 @@ export default function IncomingCallModal({ visible, caller, onAccept, onDecline
       ])
     ).start();
     return () => ringAnim.stopAnimation();
-  }, []);
+  }, [visible]);
 
   if (!caller) return null;
 

@@ -416,7 +416,7 @@ io.on('connection', (socket) => {
     console.log(`${socket.publicKey} left conversation: ${conversationId}`);
   });
 
-  socket.on('send_message', async ({ conversationId, content, encrypted, nonce, sender, timestamp, type, replyTo }) => {
+  socket.on('send_message', async ({ conversationId, content, encrypted, nonce, sender, timestamp, type, replyTo, targetPubkey }) => {
     if (!socket.publicKey && type !== 'system') {
       socket.emit('error', { message: 'Not authenticated' });
       return;
@@ -466,6 +466,22 @@ io.on('connection', (socket) => {
     const roomSize = room ? room.size : 0;
     console.log(`Broadcasting message to room ${conversationId} (${roomSize} clients)`);
     io.to(conversationId).emit('new_message', messageData);
+
+    // FCM push if DM target is offline
+    if (targetPubkey && type !== 'system' && socket.publicKey) {
+      const targetSocketId = onlineUsers.get(targetPubkey);
+      if (!targetSocketId) {
+        const fcmToken = await db.getFcmToken(targetPubkey).catch(() => null);
+        if (fcmToken) {
+          await sendFcmNotification(fcmToken, {
+            type: 'incoming_message',
+            senderPubkey: socket.publicKey,
+            conversationId,
+          });
+          console.log(`📬 FCM message push sent to ${targetPubkey.slice(0, 8)}...`);
+        }
+      }
+    }
   });
 
   socket.on('delete_message', async ({ conversationId, messageId, deleteForBoth }) => {

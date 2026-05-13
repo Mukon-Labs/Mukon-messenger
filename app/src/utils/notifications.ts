@@ -1,6 +1,5 @@
 import * as Notifications from 'expo-notifications';
-import { Platform, Linking } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform, Linking, PermissionsAndroid } from 'react-native';
 import notifee, {
   AndroidCategory,
   AndroidImportance,
@@ -58,9 +57,10 @@ export async function initializeNotifications(): Promise<boolean> {
       // Direct user to the specific settings page once so full-screen call popup works.
       // Wrapped in its own try/catch — must not break channel creation if it throws.
       if (Platform.Version >= 34) {
-        const prompted = await AsyncStorage.getItem('@mukon_fsi_prompted');
-        if (!prompted) {
-          await AsyncStorage.setItem('@mukon_fsi_prompted', '1');
+        const granted = await PermissionsAndroid.check(
+          'android.permission.USE_FULL_SCREEN_INTENT' as any
+        );
+        if (!granted) {
           try {
             await Linking.sendIntent(
               'android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENTS',
@@ -166,7 +166,7 @@ export async function sendCallNotification(
           },
         ],
         sound: 'default',
-        vibrationPattern: [0, 500, 250, 500, 250, 500],
+        vibrationPattern: [100, 500, 250, 500, 250, 500],
         lights: ['#22c55e', 500, 500],
       },
     });
@@ -187,20 +187,10 @@ export async function setBadgeCount(count: number): Promise<void> {
 
 export async function setupFcm(socket: any): Promise<void> {
   try {
-    const { getMessaging, getToken, setBackgroundMessageHandler } =
-      require('@react-native-firebase/messaging');
+    const { getMessaging, getToken } = require('@react-native-firebase/messaging');
     const messagingInstance = getMessaging();
     const token = await getToken(messagingInstance);
     socket.emit('register_fcm_token', { token });
-
-    setBackgroundMessageHandler(messagingInstance, async (remoteMessage: any) => {
-      if (remoteMessage.data?.type === 'incoming_call') {
-        await sendCallNotification(
-          remoteMessage.data.callerName || 'Unknown',
-          remoteMessage.data.callerPubkey || ''
-        );
-      }
-    });
 
     console.log('✅ FCM token registered');
   } catch (e: any) {

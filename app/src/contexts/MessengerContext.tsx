@@ -1970,7 +1970,8 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         nonce: nonceBase64,
         sender: wallet.publicKey.toBase58(),
         timestamp,
-        replyTo: replyToMessageId, // Reply reference
+        replyTo: replyToMessageId,
+        targetPubkey: recipientPubkey.toBase58(),
       });
 
       console.log('✅ Encrypted message sent via socket');
@@ -2340,8 +2341,22 @@ export const MessengerProvider: React.FC<{ children: React.ReactNode; wallet: Wa
         }
       }));
 
-      console.log(`Loaded ${result.length} contacts (${result.filter(c => c.state === 'Accepted').length} accepted, ${result.filter(c => c.state === 'Requested').length} pending)`);
+      console.log(`Loaded ${result.length} contacts (${result.filter(c => c.state === 'Accepted').length} accepted, ${result.filter(c => c.state === 'Pending').length} pending)`);
       setContacts(result);
+
+      // Cache {pubkey -> displayName} so FCM background handler can resolve names
+      // without access to MessengerContext
+      if (wallet?.publicKey) {
+        const nameMap: Record<string, string> = {};
+        for (const c of result) {
+          if (c.displayName) nameMap[c.publicKey.toBase58()] = c.displayName;
+        }
+        AsyncStorage.setItem(
+          `@mukon_contact_names_${wallet.publicKey.toBase58()}`,
+          JSON.stringify(nameMap)
+        ).catch(() => {});
+        AsyncStorage.setItem('@mukon_last_wallet', wallet.publicKey.toBase58()).catch(() => {});
+      }
     } catch (error) {
       console.error('Failed to load contacts:', error);
     }
