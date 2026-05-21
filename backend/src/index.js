@@ -2,10 +2,12 @@ const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const { PublicKey } = require('@solana/web3.js');
 const nacl = require('tweetnacl');
 const bs58 = require('bs58').default; // bs58 v6 uses default export
 const db = require('./db');
+const SocketRateLimiter = require('./socketRateLimit');
 
 const app = express();
 const httpServer = createServer(app);
@@ -22,6 +24,27 @@ const io = new Server(httpServer, {
 app.use(cors());
 app.use(express.json());
 
+// ========== RATE LIMITING ==========
+// Protect REST endpoints from DoS attacks and abuse
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,           // 1 minute window
+  max: 100,                      // 100 requests per minute per IP
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,         // Return rate limit info in RateLimit-* headers
+  legacyHeaders: false,          // Disable X-RateLimit-* headers
+});
+
+const messageLimiter = rateLimit({
+  windowMs: 60 * 1000,           // 1 minute window
+  max: 60,                       // 60 messages per minute (1/second sustained)
+  message: { error: 'Message rate limit exceeded' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Apply general rate limiting to all routes
+app.use(generalLimiter);
+
 // In-memory fallback storage (used when DATABASE_URL is not set)
 const memMessages = new Map(); // conversationId -> Message[]
 const memGroupMessages = new Map(); // groupId -> Message[]
@@ -33,6 +56,17 @@ const memPendingKeyShares = new Map(); // groupId -> Map<recipientPubkey, { encr
 // Always in-memory (ephemeral connection state)
 const onlineUsers = new Map(); // pubkey -> socket.id
 const groupRooms = new Map(); // groupId -> Set<socket.id>
+
+// Socket.IO rate limiter
+const socketRateLimiter = new SocketRateLimiter({
+  windowMs: 60000,        // 1 minute windows
+  defaultMaxPerMin: 100,  // Default limit for unlisted events
+});
+
+// Run cleanup every 5 minutes to prevent memory leaks from disconnected sockets
+setInterval(() => {
+  socketRateLimiter.cleanupStale();
+}, 5 * 60 * 1000);
 
 // ========== STORAGE ABSTRACTION ==========
 // Each function checks db.isEnabled() and falls back to in-memory Maps
@@ -233,7 +267,7 @@ app.get('/health', async (req, res) => {
   res.json({ status: 'ok', timestamp: Date.now(), database: dbHealth });
 });
 
-app.post('/messages', async (req, res) => {
+app.post('/messages', messageLimiter, async (req, res) => {
   try {
     const { conversationId, encrypted, nonce, sender, signature } = req.body;
 
@@ -365,6 +399,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_message', async ({ conversationId, content, encrypted, nonce, sender, timestamp, type, replyTo }) => {
+    // Rate limit check
+    if (!socketRateLimiter.check(socket.id, 'send_message')) {
+      socket.emit('error', { message: 'Rate limit exceeded for send_message' });
+      console.warn(`⚠️ Rate limit exceeded: ${socket.publicKey || socket.id} (send_message)`);
+      return;
+    }
     if (!socket.publicKey && type !== 'system') {
       socket.emit('error', { message: 'Not authenticated' });
       return;
@@ -437,6 +477,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('add_reaction', async ({ conversationId, messageId, emoji, userId }) => {
+    // Rate limit check
+    if (!socketRateLimiter.check(socket.id, 'add_reaction')) {
+      socket.emit('error', { message: 'Rate limit exceeded for add_reaction' });
+      console.warn(`⚠️ Rate limit exceeded: ${socket.publicKey || socket.id} (add_reaction)`);
+      return;
+    }
     console.log(`📨 add_reaction received:`, { conversationId: conversationId.slice(0, 8) + '...', messageId, emoji, userId: userId.slice(0, 8) + '...' });
 
     if (!socket.publicKey) {
@@ -592,6 +638,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_group_message', async ({ groupId, encrypted, nonce, sender, timestamp }) => {
+    // Rate limit check
+    if (!socketRateLimiter.check(socket.id, 'send_group_message')) {
+      socket.emit('error', { message: 'Rate limit exceeded for send_group_message' });
+      console.warn(`⚠️ Rate limit exceeded: ${socket.publicKey || socket.id} (send_group_message)`);
+      return;
+    }
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
@@ -628,6 +680,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('share_group_key', async ({ groupId, recipientPubkey, encryptedKey, nonce }) => {
+    // Rate limit check
+    if (!socketRateLimiter.check(socket.id, 'share_group_key')) {
+      socket.emit('error', { message: 'Rate limit exceeded for share_group_key' });
+      console.warn(`⚠️ Rate limit exceeded: ${socket.publicKey || socket.id} (share_group_key)`);
+      return;
+    }
     if (!socket.publicKey) {
       socket.emit('error', { message: 'Not authenticated' });
       return;
@@ -856,6 +914,9 @@ io.on('connection', (socket) => {
       onlineUsers.delete(socket.publicKey);
       console.log('User disconnected:', socket.publicKey);
     }
+    
+    // Clean up rate limiter data for this socket
+    socketRateLimiter.cleanup(socket.id);
   });
 });
 
